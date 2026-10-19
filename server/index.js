@@ -1,7 +1,8 @@
 import express from 'express';
 import cors from 'cors';
-import jwt from 'jsonwebtoken';
-import bcrypt from 'bcryptjs';
+import 'dotenv/config';
+import { applicationDefault, initializeApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -12,7 +13,15 @@ const __dirname = path.dirname(__filename);
 const distPath = path.join(__dirname, '..', 'dist');
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
-const JWT_SECRET = process.env.JWT_SECRET || 'savage-inventory-demo-secret';
+const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID;
+if (!FIREBASE_PROJECT_ID) {
+  throw new Error('FIREBASE_PROJECT_ID must be set to verify Firebase Authentication tokens.');
+}
+const firebaseApp = initializeApp({
+  credential: applicationDefault(),
+  projectId: FIREBASE_PROJECT_ID,
+});
+const firebaseAuth = getAuth(firebaseApp);
 const db = new Database(path.join(__dirname, 'inventory.db'));
 
 db.pragma('foreign_keys = ON');
@@ -40,9 +49,10 @@ function seedDatabase() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       email TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL,
+      password_hash TEXT NOT NULL DEFAULT '',
       role TEXT NOT NULL CHECK(role IN ('admin','vendor')) DEFAULT 'vendor',
       vendor_id INTEGER NULL,
+      firebase_uid TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(vendor_id) REFERENCES vendors(id)
     );
@@ -65,28 +75,32 @@ function seedDatabase() {
     );
   `);
 
+  const userColumns = db.pragma('table_info(users)');
+  if (!userColumns.some((column) => column.name === 'firebase_uid')) {
+    db.exec('ALTER TABLE users ADD COLUMN firebase_uid TEXT');
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid ON users(firebase_uid)');
+
   const adminExists = db.prepare('SELECT 1 FROM users WHERE email = ?').get('admin@si.co');
   if (!adminExists) {
-    const adminPassword = bcrypt.hashSync('Password123!', 10);
     db.prepare(
       'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)'
-    ).run('Savage Admin', 'admin@si.co', adminPassword, 'admin');
+    ).run('Savage Admin', 'admin@si.co', '', 'admin');
   }
 
   const vendorExists = db.prepare('SELECT 1 FROM vendors WHERE email = ?').get('vendor-support@northwind.io');
   if (!vendorExists) {
     db.prepare(
-      'INSERT INTO vendors (name, contact_name, email, status) VALUES (?, ?, ?, ?)' 
+      'INSERT INTO vendors (name, contact_name, email, status) VALUES (?, ?, ?, ?)'
     ).run('Northwind Logistics', 'Shane Porter', 'vendor-support@northwind.io', 'active');
   }
 
   const vendorUserExists = db.prepare('SELECT 1 FROM users WHERE email = ?').get('vendor@si.co');
   if (!vendorUserExists) {
     const vendorId = db.prepare('SELECT id FROM vendors WHERE email = ?').get('vendor-support@northwind.io').id;
-    const vendorPassword = bcrypt.hashSync('Password123!', 10);
     db.prepare(
       'INSERT INTO users (name, email, password_hash, role, vendor_id) VALUES (?, ?, ?, ?, ?)'
-    ).run('Northwind Vendor', 'vendor@si.co', vendorPassword, 'vendor', vendorId);
+    ).run('Northwind Vendor', 'vendor@si.co', '', 'vendor', vendorId);
   }
 
   const locationCount = db.prepare('SELECT COUNT(*) as count FROM locations').get().count;
@@ -121,19 +135,53 @@ function seedDatabase() {
 
 seedDatabase();
 
-function authUser(req, res, next) {
+const invalidTokenCodes = new Set([
+  'auth/argument-error',
+  'auth/id-token-expired',
+  'auth/invalid-id-token',
+]);
+
+const resolveFirebaseUser = db.transaction((uid, email) => {
+  const linkedUser = db.prepare('SELECT id FROM users WHERE firebase_uid = ?').get(uid);
+  if (linkedUser) {
+    return getUserData(linkedUser.id);
+  }
+
+  const account = db.prepare('SELECT id, firebase_uid FROM users WHERE lower(email) = lower(?)').get(email);
+  if (!account || account.firebase_uid) {
+    return null;
+  }
+
+  db.prepare('UPDATE users SET firebase_uid = ? WHERE id = ? AND firebase_uid IS NULL').run(uid, account.id);
+  return getUserData(account.id);
+});
+
+async function authUser(req, res, next) {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) {
     return res.status(401).json({ message: 'Authentication required.' });
   }
 
-  const token = header.replace('Bearer ', '');
+  const token = header.slice('Bearer '.length);
 
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
+    const identity = await firebaseAuth.verifyIdToken(token);
+    if (!identity.email) {
+      return res.status(403).json({ message: 'A Firebase account email is required.' });
+    }
+
+    const user = resolveFirebaseUser(identity.uid, identity.email);
+    if (!user) {
+      return res.status(403).json({ message: 'This Firebase account is not authorized for inventory access.' });
+    }
+
+    req.user = user;
+    return next();
   } catch (error) {
-    return res.status(401).json({ message: 'Invalid or expired token.' });
+    if (invalidTokenCodes.has(error.code)) {
+      return res.status(401).json({ message: 'Invalid or expired Firebase ID token.' });
+    }
+    return next(error);
   }
 }
 
@@ -160,29 +208,6 @@ app.use(express.json());
 
 app.get('/api/health', (_, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
-});
-
-app.post('/api/auth/login', (req, res) => {
-  const { email, password } = req.body || {};
-  if (!email || !password) {
-    return res.status(400).json({ message: 'Email and password are required.' });
-  }
-
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email.trim().toLowerCase());
-  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
-    return res.status(401).json({ message: 'Invalid email or password.' });
-  }
-
-  const token = jwt.sign(
-    { id: user.id, name: user.name, email: user.email, role: user.role, vendor_id: user.vendor_id },
-    JWT_SECRET,
-    { expiresIn: '8h' },
-  );
-
-  return res.json({
-    token,
-    user: { id: user.id, name: user.name, email: user.email, role: user.role, vendor_id: user.vendor_id },
-  });
 });
 
 app.get('/api/me', authUser, (req, res) => {
@@ -334,6 +359,14 @@ app.delete('/api/inventory/:id', authUser, (req, res) => {
 
   db.prepare('DELETE FROM inventory WHERE id = ?').run(id);
   res.json({ message: 'Inventory record removed.' });
+});
+
+app.use((error, req, res, next) => {
+  console.error('Unhandled API error:', error);
+  if (res.headersSent) {
+    return next(error);
+  }
+  return res.status(500).json({ message: 'An unexpected server error occurred.' });
 });
 
 const distExists = fs.existsSync(distPath);

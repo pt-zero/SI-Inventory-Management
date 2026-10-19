@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
+import {
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut,
+} from 'firebase/auth';
+import { auth, firebaseConfigured } from './firebase.js';
 
-const AUTH_TOKEN_KEY = 'si-auth-token';
 const CACHE_KEY = 'si-inventory-cache';
 const API_BASE = '/api';
 
@@ -18,7 +23,7 @@ const EMPTY_FORM = {
 };
 
 async function request(path, options = {}) {
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
+  const token = auth?.currentUser ? await auth.currentUser.getIdToken() : null;
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
@@ -36,27 +41,28 @@ async function request(path, options = {}) {
   return payload;
 }
 
-function readCache() {
+function readCache(uid) {
   try {
-    return JSON.parse(localStorage.getItem(CACHE_KEY) || '{}');
+    return JSON.parse(localStorage.getItem(`${CACHE_KEY}:${uid}`) || '{}');
   } catch {
     return {};
   }
 }
 
-function writeCache(next) {
-  localStorage.setItem(CACHE_KEY, JSON.stringify(next));
+function writeCache(uid, next) {
+  localStorage.setItem(`${CACHE_KEY}:${uid}`, JSON.stringify(next));
 }
 
 function App() {
-  const [token, setToken] = useState(localStorage.getItem(AUTH_TOKEN_KEY) || '');
+  const [firebaseUser, setFirebaseUser] = useState(null);
+  const [authReady, setAuthReady] = useState(!firebaseConfigured);
   const [user, setUser] = useState(null);
   const [inventory, setInventory] = useState([]);
   const [vendors, setVendors] = useState([]);
   const [locations, setLocations] = useState([]);
   const [summary, setSummary] = useState({ totalItems: 0, lowStock: 0, inTransit: 0, activeVendors: 0 });
   const [loading, setLoading] = useState(false);
-  const [loginState, setLoginState] = useState({ email: 'admin@si.co', password: 'Password123!' });
+  const [loginState, setLoginState] = useState({ email: '', password: '' });
   const [itemForm, setItemForm] = useState(EMPTY_FORM);
   const [editingId, setEditingId] = useState(null);
   const [filter, setFilter] = useState('all');
@@ -74,8 +80,10 @@ function App() {
     });
   }, [inventory, filter, searchQuery]);
 
-  async function loadSnapshot() {
-    const cached = readCache();
+  async function loadSnapshot(uid = firebaseUser?.uid) {
+    if (!uid) return;
+
+    const cached = readCache(uid);
     if (cached.inventory) {
       setInventory(cached.inventory);
     }
@@ -97,53 +105,78 @@ function App() {
         request('/locations'),
       ]);
 
+      if (auth?.currentUser?.uid !== uid) {
+        return;
+      }
+
       setUser(me.user);
       setInventory(dashboard.inventory);
       setSummary(dashboard.summary);
       setVendors(vendorList);
       setLocations(locationList);
-      writeCache({ inventory: dashboard.inventory, summary: dashboard.summary, vendors: vendorList, locations: locationList });
+      writeCache(uid, { inventory: dashboard.inventory, summary: dashboard.summary, vendors: vendorList, locations: locationList });
     } catch (requestError) {
-      console.error(requestError);
-      setError(requestError.message || 'Unable to load data.');
+      if (auth?.currentUser?.uid === uid) {
+        console.error(requestError);
+        setError(requestError.message || 'Unable to load data.');
+      }
     }
   }
 
   useEffect(() => {
-    if (!token) {
+    if (!auth) return undefined;
+
+    return onAuthStateChanged(auth, (nextUser) => {
+      setFirebaseUser(nextUser);
+      setAuthReady(true);
       setUser(null);
-      return;
+      setInventory([]);
+      setVendors([]);
+      setLocations([]);
+      setSummary({ totalItems: 0, lowStock: 0, inTransit: 0, activeVendors: 0 });
+      setError('');
+      setLoading(false);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!firebaseUser) {
+      setUser(null);
+      return undefined;
     }
+
+    let active = true;
     setLoading(true);
-    loadSnapshot()
-      .finally(() => setLoading(false));
-  }, [token]);
+    loadSnapshot(firebaseUser.uid)
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [firebaseUser]);
 
   async function handleLogin(event) {
     event.preventDefault();
     setError('');
 
     try {
-      const result = await request('/auth/login', {
-        method: 'POST',
-        body: JSON.stringify(loginState),
-      });
-      localStorage.setItem(AUTH_TOKEN_KEY, result.token);
-      setToken(result.token);
-      setUser(result.user);
+      await signInWithEmailAndPassword(
+        auth,
+        loginState.email.trim(),
+        loginState.password,
+      );
     } catch (loginError) {
-      setError(loginError.message || 'Login failed.');
+      setError(loginError.message || 'Unable to sign in.');
     }
   }
 
-  function handleLogout() {
-    localStorage.removeItem(AUTH_TOKEN_KEY);
-    setToken('');
-    setUser(null);
-    setInventory([]);
-    setVendors([]);
-    setLocations([]);
-    setSummary({ totalItems: 0, lowStock: 0, inTransit: 0, activeVendors: 0 });
+  async function handleLogout() {
+    try {
+      await signOut(auth);
+    } catch (logoutError) {
+      setError(logoutError.message || 'Unable to sign out.');
+    }
   }
 
   async function handleSaveInventory(event) {
@@ -200,7 +233,7 @@ function App() {
     }
   }
 
-  if (!token || !user) {
+  if (!authReady || !firebaseUser || !user) {
     return (
       <div className="auth-shell">
         <div className="auth-card">
@@ -214,25 +247,31 @@ function App() {
 
           <p className="subtitle">Secure access for admin and vendor operations.</p>
 
+          {!firebaseConfigured ? (
+            <p className="error-text">Firebase is not configured. Copy the Firebase settings from .env.example into your .env file.</p>
+          ) : null}
+
           <form className="auth-form" onSubmit={handleLogin}>
             <label>
               Email
-              <input value={loginState.email} onChange={(event) => setLoginState((current) => ({ ...current, email: event.target.value }))} />
+              <input type="email" autoComplete="email" required value={loginState.email} onChange={(event) => setLoginState((current) => ({ ...current, email: event.target.value }))} />
             </label>
             <label>
               Password
-              <input type="password" value={loginState.password} onChange={(event) => setLoginState((current) => ({ ...current, password: event.target.value }))} />
+              <input type="password" autoComplete="current-password" required value={loginState.password} onChange={(event) => setLoginState((current) => ({ ...current, password: event.target.value }))} />
             </label>
-            <button type="submit" className="primary-button">Sign in</button>
+            <button type="submit" className="primary-button" disabled={!firebaseConfigured || !authReady}>Sign in</button>
           </form>
 
           <div className="demo-box">
-            <strong>Demo access</strong>
-            <div>Admin: admin@si.co / Password123!</div>
-            <div>Vendor: vendor@si.co / Password123!</div>
+            <strong>Account access</strong>
+            <div>Accounts are provisioned by an administrator. Contact your administrator if you need access.</div>
           </div>
 
           {error ? <p className="error-text">{error}</p> : null}
+          {firebaseUser ? (
+            <button className="secondary-button" type="button" onClick={handleLogout}>Sign out</button>
+          ) : null}
         </div>
       </div>
     );
