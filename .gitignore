@@ -11,6 +11,10 @@ node_modules
 dist
 dist-ssr
 *.local
+.dotnet/
+**/bin/
+**/obj/
+backend/publish/
 .env
 !.env.example
 *service-account*.json

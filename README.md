@@ -5,7 +5,7 @@ This project is a full-stack inventory management prototype designed for the Sav
 ## Tech stack
 
 - React + Vite for the front-end
-- Express.js + SQLite for the API and data layer
+- ASP.NET Core + SQLite for the API and data layer
 - Firebase Authentication for sign-in and ID token verification
 - SQLite-backed admin/vendor roles and access controls
 - Local browser caching for fast UI refreshes
@@ -15,7 +15,7 @@ This project is a full-stack inventory management prototype designed for the Sav
 The app uses a simple three-layer architecture:
 
 1. Front-end: React dashboard with role-aware views for admin and vendor users.
-2. API layer: Express API with Firebase-authenticated access to inventory, vendors, and locations.
+2. API layer: ASP.NET Core API with Firebase-authenticated access to inventory, vendors, and locations.
 3. Data layer: SQLite database seeded with account role mappings, vendors, inventory, and locations.
 
 The design is intentionally compact, but it follows good separation of concerns with a REST API and service-style route handlers.
@@ -42,7 +42,7 @@ npm install
 npm run dev
 ```
 
-The API loads `.env` automatically. The Vite client uses the `VITE_FIREBASE_*` settings.
+Install the .NET 10 SDK and Node.js before starting the app. The ASP.NET Core API and Vite client both read the root `.env` file. The ASP.NET Core backend uses the existing `server/inventory.db` SQLite database by default.
 
 This starts:
 
@@ -56,7 +56,7 @@ npm run build
 npm start
 ```
 
-The server will serve the built application from the `dist` folder when present. Configure the same Firebase environment variables and server credentials in the production environment.
+The ASP.NET Core API serves the Vite production build from `dist`. Configure the Firebase environment variables and server credentials in the production environment.
 
 ## Assumptions
 
