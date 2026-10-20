@@ -1,3 +1,4 @@
+using AutoMapper;
 using DotNetEnv;
 using FirebaseAdmin;
 using FirebaseAdmin.Auth;
@@ -32,6 +33,14 @@ if (string.IsNullOrWhiteSpace(connectionString))
     throw new InvalidOperationException("AZURE_SQL_CONNECTION_STRING must be configured to connect to Azure SQL.");
 }
 
+builder.Services.AddAutoMapper(configuration =>
+{
+    var licenseKey = builder.Configuration["AUTOMAPPER_LICENSE_KEY"];
+    if (!string.IsNullOrWhiteSpace(licenseKey))
+    {
+        configuration.LicenseKey = licenseKey;
+    }
+}, typeof(InventoryMappingProfile));
 builder.Services.AddDbContext<InventoryDbContext>(options =>
     options.UseSqlServer(connectionString, sqlServerOptions => sqlServerOptions.EnableRetryOnFailure()));
 builder.Services.AddScoped<InventoryDatabase>();
@@ -48,6 +57,7 @@ builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
     policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader()));
 
 var app = builder.Build();
+app.Services.GetRequiredService<AutoMapper.IConfigurationProvider>().AssertConfigurationIsValid();
 await using (var scope = app.Services.CreateAsyncScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<InventoryDbContext>();
@@ -97,18 +107,7 @@ var api = app.MapGroup("/api").WithMetadata(new FirebaseAuthRequiredMetadata());
 api.MapGet("/me", (HttpContext context) =>
 {
     var user = CurrentUser(context);
-    return Results.Ok(new
-    {
-        user = new
-        {
-            id = user.Id,
-            name = user.Name,
-            email = user.Email,
-            role = user.Role,
-            vendor_id = user.VendorId,
-            vendor_name = user.VendorName,
-        },
-    });
+    return Results.Ok(new { user });
 });
 
 api.MapGet("/dashboard", (HttpContext context, InventoryDatabase database) =>
@@ -118,11 +117,11 @@ api.MapGet("/dashboard", (HttpContext context, InventoryDatabase database) =>
     var summary = new
     {
         totalItems = inventory.Count,
-        lowStock = inventory.Count(item => Convert.ToInt32(item["quantity"]) <= 10),
-        inTransit = inventory.Count(item => string.Equals(item["shipment_status"]?.ToString(), "In Transit", StringComparison.Ordinal)),
+        lowStock = inventory.Count(item => item.Quantity <= 10),
+        inTransit = inventory.Count(item => string.Equals(item.ShipmentStatus, "In Transit", StringComparison.Ordinal)),
         activeVendors = inventory
-            .Where(item => item["vendor_id"] is not null)
-            .Select(item => Convert.ToInt64(item["vendor_id"]))
+            .Where(item => item.VendorId is not null)
+            .Select(item => item.VendorId!.Value)
             .Distinct()
             .Count(),
     };
@@ -236,7 +235,7 @@ api.MapPut("/inventory/{id:long}", (long id, HttpContext context, InventoryInput
     {
         return Results.NotFound(new { message = "Inventory record not found." });
     }
-    if (user.Role == "vendor" && Convert.ToInt64(current["vendor_id"]) != user.VendorId)
+    if (user.Role == "vendor" && current.VendorId != user.VendorId)
     {
         return Results.Json(new { message = "Vendor accounts can only edit assigned inventory." }, statusCode: StatusCodes.Status403Forbidden);
     }
@@ -264,7 +263,7 @@ api.MapDelete("/inventory/{id:long}", (long id, HttpContext context, InventoryDa
     {
         return Results.NotFound(new { message = "Inventory record not found." });
     }
-    if (user.Role == "vendor" && Convert.ToInt64(current["vendor_id"]) != user.VendorId)
+    if (user.Role == "vendor" && current.VendorId != user.VendorId)
     {
         return Results.Json(new { message = "Vendor accounts can only delete assigned inventory." }, statusCode: StatusCodes.Status403Forbidden);
     }
@@ -291,9 +290,9 @@ if (distPath is not null && File.Exists(indexPath))
 
 app.Run();
 
-static InventoryUser CurrentUser(HttpContext context)
+static InventoryUserResponse CurrentUser(HttpContext context)
 {
-    return context.Items[FirebaseAuthenticationMiddleware.UserItemKey] as InventoryUser
+    return context.Items[FirebaseAuthenticationMiddleware.UserItemKey] as InventoryUserResponse
         ?? throw new InvalidOperationException("Authenticated inventory user is missing.");
 }
 

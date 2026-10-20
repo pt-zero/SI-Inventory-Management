@@ -6,6 +6,7 @@ This project is a full-stack inventory management prototype designed for the Sav
 
 - React + Vite for the front-end
 - ASP.NET Core + Azure SQL for the API and relational data
+- AutoMapper for mapping backend entities to API response DTOs
 - Firebase Authentication for sign-in and ID token verification
 - Azure SQL-backed admin/vendor roles and access controls
 - Local browser caching for fast UI refreshes
@@ -35,6 +36,8 @@ The design is intentionally compact, but it follows good separation of concerns 
 2. In Firebase Console, enable **Email/Password** under Authentication > Sign-in method. Add `localhost` under Authentication > Settings > Authorized domains for local development.
 3. Copy `.env.example` to `.env` and fill in the Web app values. Set `FIREBASE_PROJECT_ID` to the same project ID.
 4. Configure Application Default Credentials for the API server. For local development, create a service-account key in Firebase Console > Project settings > Service accounts, save it outside the repository, and set `GOOGLE_APPLICATION_CREDENTIALS` to its absolute path. Never commit this key. On Google Cloud, use the runtime's attached service account instead.
+
+The `.env.example` includes an optional `AUTOMAPPER_LICENSE_KEY` setting. Leave it empty unless you have an AutoMapper license key to configure; keep any real key private and out of source control.
 
 ## Azure SQL setup
 

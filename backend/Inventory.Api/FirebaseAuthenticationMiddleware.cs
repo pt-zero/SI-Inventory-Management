@@ -54,7 +54,7 @@ public sealed class FirebaseAuthenticationMiddleware(
             return;
         }
 
-        InventoryUser? user;
+        InventoryUserResponse? user;
         try
         {
             user = database.LinkFirebaseUser(identity.Uid, email);

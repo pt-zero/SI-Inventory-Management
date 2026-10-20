@@ -14,7 +14,6 @@
     "start": "dotnet run --project backend/Inventory.Api --configuration Release"
   },
   "devDependencies": {
-    "typescript": "^7.0.2",
     "vite": "^8.3.0"
   },
   "dependencies": {

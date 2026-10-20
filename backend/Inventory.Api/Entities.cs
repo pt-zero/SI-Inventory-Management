@@ -51,5 +51,3 @@ public sealed class InventoryItem
     public Vendor? Vendor { get; set; }
     public Location? Location { get; set; }
 }
-
-public sealed record InventoryUser(long Id, string Name, string Email, string Role, long? VendorId, string? VendorName);
