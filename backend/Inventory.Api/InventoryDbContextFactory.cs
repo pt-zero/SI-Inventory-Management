@@ -28,7 +28,7 @@ public sealed class InventoryDbContextFactory : IDesignTimeDbContextFactory<Inve
         }
 
         var options = new DbContextOptionsBuilder<InventoryDbContext>()
-            .UseSqlServer(connectionString)
+            .UseSqlServer(connectionString, sqlServerOptions => sqlServerOptions.EnableRetryOnFailure())
             .Options;
         return new InventoryDbContext(options);
     }

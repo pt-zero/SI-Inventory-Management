@@ -32,7 +32,8 @@ if (string.IsNullOrWhiteSpace(connectionString))
     throw new InvalidOperationException("AZURE_SQL_CONNECTION_STRING must be configured to connect to Azure SQL.");
 }
 
-builder.Services.AddDbContext<InventoryDbContext>(options => options.UseSqlServer(connectionString));
+builder.Services.AddDbContext<InventoryDbContext>(options =>
+    options.UseSqlServer(connectionString, sqlServerOptions => sqlServerOptions.EnableRetryOnFailure()));
 builder.Services.AddScoped<InventoryDatabase>();
 builder.Services.AddSingleton(_ =>
 {
