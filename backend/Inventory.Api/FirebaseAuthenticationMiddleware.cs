@@ -9,12 +9,11 @@ public sealed class FirebaseAuthRequiredMetadata
 public sealed class FirebaseAuthenticationMiddleware(
     RequestDelegate next,
     FirebaseAuth firebaseAuth,
-    InventoryDatabase database,
     ILogger<FirebaseAuthenticationMiddleware> logger)
 {
     public static readonly object UserItemKey = new();
 
-    public async Task InvokeAsync(HttpContext context)
+    public async Task InvokeAsync(HttpContext context, InventoryDatabase database)
     {
         if (context.GetEndpoint()?.Metadata.GetMetadata<FirebaseAuthRequiredMetadata>() is null)
         {
