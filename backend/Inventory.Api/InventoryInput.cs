@@ -16,6 +16,27 @@ public sealed class VendorInput
 
     [JsonPropertyName("status")]
     public string? Status { get; init; }
+
+    [JsonPropertyName("password")]
+    public string? Password { get; init; }
+}
+
+public sealed class VendorStatusInput
+{
+    [JsonPropertyName("status")]
+    public string? Status { get; init; }
+}
+
+public sealed class VendorContactInput
+{
+    [JsonPropertyName("contact_name")]
+    public string? ContactName { get; init; }
+
+    [JsonPropertyName("email")]
+    public string? Email { get; init; }
+
+    [JsonPropertyName("password")]
+    public string? Password { get; init; }
 }
 
 public sealed class LocationInput

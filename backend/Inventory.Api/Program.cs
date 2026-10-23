@@ -7,6 +7,7 @@ using Inventory.Api;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
+using System.Net.Mail;
 
 var dotenvDirectory = new DirectoryInfo(Directory.GetCurrentDirectory());
 while (dotenvDirectory is not null && !File.Exists(Path.Combine(dotenvDirectory.FullName, ".env")))
@@ -114,16 +115,16 @@ api.MapGet("/dashboard", (HttpContext context, InventoryDatabase database) =>
 {
     var user = CurrentUser(context);
     var inventory = database.GetInventory(user.Role == "vendor" ? user.VendorId : null);
+    var vendorCounts = user.Role == "admin"
+        ? database.GetVendorStatusCounts()
+        : (Active: 0, Paused: 0);
     var summary = new
     {
         totalItems = inventory.Count,
-        lowStock = inventory.Count(item => item.Quantity <= 10),
+        lowStock = inventory.Count(item => string.Equals(item.Status, "Low Stock", StringComparison.OrdinalIgnoreCase)),
         inTransit = inventory.Count(item => string.Equals(item.ShipmentStatus, "In Transit", StringComparison.Ordinal)),
-        activeVendors = inventory
-            .Where(item => item.VendorId is not null)
-            .Select(item => item.VendorId!.Value)
-            .Distinct()
-            .Count(),
+        activeVendors = vendorCounts.Active,
+        pausedVendors = vendorCounts.Paused,
     };
     return Results.Ok(new { summary, inventory });
 });
@@ -134,27 +135,411 @@ api.MapGet("/vendors", (HttpContext context, InventoryDatabase database) =>
     return Results.Ok(database.GetVendors(user.Role == "vendor" ? user.VendorId : null));
 });
 
-api.MapPost("/vendors", (HttpContext context, VendorInput input, InventoryDatabase database) =>
+api.MapPost("/vendors", async (
+    HttpContext context,
+    VendorInput input,
+    InventoryDatabase database,
+    FirebaseAuth firebaseAuth,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
+{
+    cancellationToken.ThrowIfCancellationRequested();
+    if (!IsAdmin(context))
+    {
+        return Results.Json(new { message = "You do not have access to this resource." }, statusCode: StatusCodes.Status403Forbidden);
+    }
+    var email = input.Email?.Trim().ToLowerInvariant();
+    var status = input.Status?.Trim().ToLowerInvariant() ?? "active";
+    if (string.IsNullOrWhiteSpace(input.Name)
+        || string.IsNullOrWhiteSpace(input.ContactName)
+        || string.IsNullOrWhiteSpace(email)
+        || string.IsNullOrWhiteSpace(input.Password))
+    {
+        return Results.BadRequest(new { message = "Vendor details, email, and an initial password are required." });
+    }
+    if (input.Name.Trim().Length > 200
+        || input.ContactName.Trim().Length > 200
+        || email.Length > 320)
+    {
+        return Results.BadRequest(new { message = "Vendor name and contact name must be 200 characters or fewer, and email must be 320 characters or fewer." });
+    }
+    if (!IsValidEmail(email))
+    {
+        return Results.BadRequest(new { message = "Enter a valid vendor email address." });
+    }
+    if (input.Password.Length < 6 || input.Password.Length > 128)
+    {
+        return Results.BadRequest(new { message = "The initial password must be between 6 and 128 characters." });
+    }
+    if (status is not ("active" or "paused"))
+    {
+        return Results.BadRequest(new { message = "Vendor status must be active or paused." });
+    }
+
+    UserRecord firebaseUser;
+    try
+    {
+        firebaseUser = await firebaseAuth.CreateUserAsync(new UserRecordArgs
+        {
+            Email = email,
+            Password = input.Password,
+            DisplayName = input.ContactName.Trim(),
+            Disabled = status == "paused",
+        }, cancellationToken);
+    }
+    catch (FirebaseAuthException exception) when (exception.AuthErrorCode == AuthErrorCode.EmailAlreadyExists)
+    {
+        return Results.Conflict(new { message = "A Firebase account already exists for this email address." });
+    }
+    catch (FirebaseAuthException exception)
+    {
+        logger.LogError(exception, "Unable to create Firebase account for vendor email {Email}.", email);
+        return Results.Problem(
+            title: "Unable to create vendor account.",
+            detail: $"Firebase Authentication rejected account creation (code: {exception.AuthErrorCode}). Verify that Email/Password sign-in is enabled, the API service account has Firebase Authentication Admin permissions, the Firebase project IDs match, and the password meets the project's policy.",
+            statusCode: StatusCodes.Status502BadGateway);
+    }
+    catch (Exception exception)
+    {
+        logger.LogError(exception, "Firebase account creation failed for vendor email {Email}.", email);
+        return Results.Problem(
+            title: "Unable to create vendor account.",
+            detail: "The API could not provision the Firebase account. Verify its Application Default Credentials, Firebase project ID, and service-account permissions; check the API logs for details.",
+            statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    try
+    {
+        var id = database.AddVendor(
+            input.Name.Trim(),
+            input.ContactName.Trim(),
+            email,
+            status,
+            firebaseUser.Uid);
+        return Results.Created($"/api/vendors/{id}", new { id, message = "Vendor and Firebase account created." });
+    }
+    catch (DbUpdateException exception) when (IsUniqueConstraint(exception))
+    {
+        try
+        {
+            await firebaseAuth.DeleteUserAsync(firebaseUser.Uid, CancellationToken.None);
+        }
+        catch (Exception cleanupException)
+        {
+            logger.LogError(cleanupException, "Unable to remove orphaned Firebase account {FirebaseUid} after vendor creation failed.", firebaseUser.Uid);
+            return Results.Problem(
+                title: "Vendor creation failed.",
+                detail: "The email is already registered in the inventory system. Firebase account cleanup also failed; contact an administrator.",
+                statusCode: StatusCodes.Status500InternalServerError);
+        }
+
+        return Results.Conflict(new { message = "A vendor or user account already exists for this email address." });
+    }
+    catch (Exception exception)
+    {
+        logger.LogError(exception, "Unable to save vendor account for email {Email}.", email);
+        var firebaseCleanupFailed = false;
+        try
+        {
+            await firebaseAuth.DeleteUserAsync(firebaseUser.Uid, CancellationToken.None);
+        }
+        catch (Exception cleanupException)
+        {
+            firebaseCleanupFailed = true;
+            logger.LogError(cleanupException, "Unable to remove orphaned Firebase account {FirebaseUid} after vendor creation failed.", firebaseUser.Uid);
+        }
+
+        return Results.Problem(
+            title: "Vendor creation failed.",
+            detail: firebaseCleanupFailed
+                ? "The vendor could not be saved and its Firebase account could not be removed. Contact an administrator."
+                : "The Firebase account was created but removed because the vendor could not be saved. Check the API logs for the database error.",
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+}).Accepts<VendorInput>("application/json");
+
+api.MapGet("/vendors/{id:long}", (
+    long id,
+    HttpContext context,
+    InventoryDatabase database,
+    CancellationToken cancellationToken) =>
+{
+    cancellationToken.ThrowIfCancellationRequested();
+    var user = CurrentUser(context);
+    if (user.Role == "vendor" && user.VendorId != id)
+    {
+        return Results.NotFound(new { message = "Vendor not found." });
+    }
+
+    var vendor = database.GetVendor(id);
+    return vendor is null ? Results.NotFound(new { message = "Vendor not found." }) : Results.Ok(vendor);
+});
+
+api.MapPut("/vendors/{id:long}/contact", async (
+    long id,
+    HttpContext context,
+    VendorContactInput input,
+    InventoryDatabase database,
+    FirebaseAuth firebaseAuth,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
 {
     if (!IsAdmin(context))
     {
         return Results.Json(new { message = "You do not have access to this resource." }, statusCode: StatusCodes.Status403Forbidden);
     }
-    if (string.IsNullOrWhiteSpace(input.Name) || string.IsNullOrWhiteSpace(input.ContactName) || string.IsNullOrWhiteSpace(input.Email))
+
+    var contactName = input.ContactName?.Trim();
+    var email = input.Email?.Trim().ToLowerInvariant();
+    if (string.IsNullOrWhiteSpace(contactName) || string.IsNullOrWhiteSpace(email))
     {
-        return Results.BadRequest(new { message = "Vendor details are required." });
+        return Results.BadRequest(new { message = "Contact name and email are required." });
+    }
+    if (contactName.Length > 200 || email.Length > 320)
+    {
+        return Results.BadRequest(new { message = "Contact name must be 200 characters or fewer and email must be 320 characters or fewer." });
+    }
+    if (!IsValidEmail(email))
+    {
+        return Results.BadRequest(new { message = "Enter a valid contact email address." });
+    }
+    if (!string.IsNullOrEmpty(input.Password) && (input.Password.Length < 6 || input.Password.Length > 128))
+    {
+        return Results.BadRequest(new { message = "The password must be between 6 and 128 characters." });
+    }
+
+    var current = database.GetVendorContactState(id);
+    if (current is null) return Results.NotFound(new { message = "Vendor not found." });
+    if (current.UserId is not { } userId || current.FirebaseUid is not { } firebaseUid)
+    {
+        return Results.Conflict(new
+        {
+            message = "This vendor has no linked Firebase login account, so its contact email cannot be changed.",
+        });
+    }
+    if (database.IsVendorContactEmailInUse(id, userId, email))
+    {
+        return Results.Conflict(new { message = "That email address is already assigned to another vendor or user." });
     }
 
     try
     {
-        var id = database.AddVendor(input.Name, input.ContactName, input.Email, input.Status ?? "active");
-        return Results.Json(new { id, message = "Vendor created." }, statusCode: StatusCodes.Status201Created);
+        await firebaseAuth.UpdateUserAsync(new UserRecordArgs
+        {
+            Uid = firebaseUid,
+            Email = email,
+            DisplayName = contactName,
+        }, cancellationToken);
+    }
+    catch (FirebaseAuthException exception) when (exception.AuthErrorCode == AuthErrorCode.EmailAlreadyExists)
+    {
+        return Results.Conflict(new { message = "A Firebase account already exists for that email address." });
+    }
+    catch (Exception exception)
+    {
+        logger.LogError(exception, "Unable to update Firebase contact details for vendor {VendorId}.", id);
+        return Results.Problem(
+            title: "Unable to update vendor contact.",
+            detail: "Firebase could not update the vendor login email or display name. No vendor contact details were changed.",
+            statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    try
+    {
+        database.UpdateVendorContact(id, userId, contactName, email);
     }
     catch (DbUpdateException exception) when (IsUniqueConstraint(exception))
     {
-        return Results.BadRequest(new { message = "Vendor already exists or the email is invalid." });
+        logger.LogInformation(exception, "Vendor {VendorId} contact update conflicted with a duplicate email.", id);
+        var restored = await RestoreFirebaseVendorContactAsync(
+            firebaseAuth, firebaseUid, current.Email, current.ContactName, logger, id);
+        return restored
+            ? Results.Conflict(new { message = "That email address is already assigned to another vendor or user." })
+            : Results.Problem(
+                title: "Vendor contact update failed.",
+                detail: "The email was not saved because it is already in use, and Firebase could not be restored to its previous email. Contact an administrator.",
+                statusCode: StatusCodes.Status500InternalServerError);
     }
-}).Accepts<VendorInput>("application/json");
+    catch (Exception exception)
+    {
+        logger.LogError(exception, "Unable to save contact details for vendor {VendorId}.", id);
+        var restored = await RestoreFirebaseVendorContactAsync(
+            firebaseAuth, firebaseUid, current.Email, current.ContactName, logger, id);
+        return Results.Problem(
+            title: "Vendor contact update failed.",
+            detail: restored
+                ? "The database could not save the updated contact details. Firebase was restored to the previous login email."
+                : "The database could not save the updated contact details, and Firebase could not be restored. Contact an administrator.",
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+
+    if (!string.IsNullOrEmpty(input.Password))
+    {
+        try
+        {
+            await firebaseAuth.UpdateUserAsync(new UserRecordArgs
+            {
+                Uid = firebaseUid,
+                Password = input.Password,
+            }, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "Unable to update Firebase password for vendor {VendorId}.", id);
+            try
+            {
+                database.UpdateVendorContact(id, userId, current.ContactName, current.Email);
+            }
+            catch (Exception rollbackException)
+            {
+                logger.LogError(rollbackException, "Unable to restore database contact details for vendor {VendorId} after password update failed.", id);
+                return Results.Problem(
+                    title: "Vendor password update failed.",
+                    detail: "Firebase rejected or could not confirm the password update, and the previous contact details could not be restored in the database. Contact an administrator.",
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+
+            var firebaseRestored = await RestoreFirebaseVendorContactAsync(
+                firebaseAuth, firebaseUid, current.Email, current.ContactName, logger, id);
+            return Results.Problem(
+                title: "Vendor password update failed.",
+                detail: firebaseRestored
+                    ? "The contact changes were rolled back because Firebase could not update the password. Retry the update; if Firebase reported a network error, verify the vendor’s password before retrying."
+                    : "The contact changes were rolled back in the database, but Firebase could not be restored to the previous email and contact name. Contact an administrator.",
+                statusCode: firebaseRestored ? StatusCodes.Status502BadGateway : StatusCodes.Status500InternalServerError);
+        }
+    }
+
+    return Results.Ok(new
+    {
+        contact_name = contactName,
+        email,
+        password_updated = !string.IsNullOrEmpty(input.Password),
+    });
+}).Accepts<VendorContactInput>("application/json");
+
+api.MapPut("/vendors/{id:long}/status", async (
+    long id,
+    HttpContext context,
+    VendorStatusInput input,
+    InventoryDatabase database,
+    FirebaseAuth firebaseAuth,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
+{
+    if (!IsAdmin(context))
+    {
+        return Results.Json(new { message = "You do not have access to this resource." }, statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    var status = input.Status?.Trim().ToLowerInvariant();
+    if (status is not ("active" or "paused"))
+    {
+        return Results.BadRequest(new { message = "Vendor status must be active or paused." });
+    }
+
+    var current = database.GetVendorStatusAndFirebaseUid(id);
+    if (current is null) return Results.NotFound(new { message = "Vendor not found." });
+
+    var shouldDisable = status == "paused";
+    if (current.Value.FirebaseUid is { } firebaseUid)
+    {
+        try
+        {
+            await firebaseAuth.UpdateUserAsync(new UserRecordArgs
+            {
+                Uid = firebaseUid,
+                Disabled = shouldDisable,
+            }, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "Unable to update Firebase access for vendor {VendorId}.", id);
+            return Results.Problem(
+                title: "Unable to update vendor access.",
+                detail: "The vendor status was not changed because Firebase account access could not be updated.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
+    }
+
+    try
+    {
+        database.UpdateVendorStatus(id, status);
+        return Results.Ok(new { message = "Vendor status updated.", status });
+    }
+    catch (Exception exception)
+    {
+        logger.LogError(exception, "Unable to update status for vendor {VendorId}.", id);
+        if (current.Value.FirebaseUid is { } rollbackFirebaseUid)
+        {
+            try
+            {
+                await firebaseAuth.UpdateUserAsync(new UserRecordArgs
+                {
+                    Uid = rollbackFirebaseUid,
+                    Disabled = !string.Equals(current.Value.Status, "active", StringComparison.OrdinalIgnoreCase),
+                }, CancellationToken.None);
+            }
+            catch (Exception rollbackException)
+            {
+                logger.LogError(rollbackException, "Unable to restore Firebase access for vendor {VendorId} after status update failed.", id);
+                return Results.Problem(
+                    title: "Vendor status update failed.",
+                    detail: "The database update failed and Firebase access could not be restored. Contact an administrator.",
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+        }
+
+        return Results.Problem(title: "Vendor status update failed.", statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
+api.MapDelete("/vendors/{id:long}", async (
+    long id,
+    HttpContext context,
+    InventoryDatabase database,
+    FirebaseAuth firebaseAuth,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
+{
+    cancellationToken.ThrowIfCancellationRequested();
+    if (!IsAdmin(context))
+    {
+        return Results.Json(new { message = "You do not have access to this resource." }, statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    var deletion = database.DeleteVendor(id);
+    if (!deletion.Found) return Results.NotFound(new { message = "Vendor not found." });
+    if (deletion.HasInventory)
+    {
+        return Results.Conflict(new { message = "Reassign or remove this vendor's inventory before deleting the vendor." });
+    }
+
+    var failedAccountCleanup = false;
+    foreach (var firebaseUid in deletion.FirebaseUids)
+    {
+        try
+        {
+            await firebaseAuth.DeleteUserAsync(firebaseUid, CancellationToken.None);
+        }
+        catch (FirebaseAuthException exception) when (exception.AuthErrorCode == AuthErrorCode.UserNotFound)
+        {
+        }
+        catch (Exception exception)
+        {
+            failedAccountCleanup = true;
+            logger.LogError(exception, "Vendor {VendorId} was deleted but Firebase account {FirebaseUid} could not be removed.", id, firebaseUid);
+        }
+    }
+
+    return failedAccountCleanup
+        ? Results.Ok(new
+        {
+            message = "Vendor deleted, but one or more Firebase accounts could not be removed. Contact an administrator.",
+            cleanupWarning = true,
+        })
+        : Results.NoContent();
+});
 
 api.MapGet("/locations", (InventoryDatabase database) => Results.Ok(database.GetLocations()));
 
@@ -168,17 +553,81 @@ api.MapPost("/locations", (HttpContext context, LocationInput input, InventoryDa
     {
         return Results.BadRequest(new { message = "Location name and code are required." });
     }
+    var name = input.Name.Trim();
+    var code = input.Code.Trim();
+    var type = string.IsNullOrWhiteSpace(input.Type) ? "Warehouse" : input.Type.Trim();
+    if (name.Length > 200 || code.Length > 80 || string.IsNullOrWhiteSpace(type) || type.Length > 80)
+    {
+        return Results.BadRequest(new { message = "Location name must be 200 characters or fewer; code and type must be 80 characters or fewer." });
+    }
 
     try
     {
-        var id = database.AddLocation(input.Name, input.Code, input.Type ?? "Warehouse");
+        var id = database.AddLocation(name, code, type);
         return Results.Json(new { id, message = "Location created." }, statusCode: StatusCodes.Status201Created);
     }
     catch (DbUpdateException exception) when (IsUniqueConstraint(exception))
     {
-        return Results.BadRequest(new { message = "Location code already exists." });
+        return Results.Conflict(new { message = "Location code already exists." });
     }
 }).Accepts<LocationInput>("application/json");
+
+api.MapPut("/locations/{id:long}", (long id, HttpContext context, LocationInput input, InventoryDatabase database) =>
+{
+    if (!IsAdmin(context))
+    {
+        return Results.Json(new { message = "You do not have access to this resource." }, statusCode: StatusCodes.Status403Forbidden);
+    }
+    if (string.IsNullOrWhiteSpace(input.Name) || string.IsNullOrWhiteSpace(input.Code))
+    {
+        return Results.BadRequest(new { message = "Location name and code are required." });
+    }
+
+    var name = input.Name.Trim();
+    var code = input.Code.Trim();
+    var type = string.IsNullOrWhiteSpace(input.Type) ? "Warehouse" : input.Type.Trim();
+    if (name.Length > 200 || code.Length > 80 || string.IsNullOrWhiteSpace(type) || type.Length > 80)
+    {
+        return Results.BadRequest(new { message = "Location name must be 200 characters or fewer; code and type must be 80 characters or fewer." });
+    }
+
+    try
+    {
+        return database.UpdateLocation(id, name, code, type)
+            ? Results.Ok(new { id, message = "Location updated." })
+            : Results.NotFound(new { message = "Location not found." });
+    }
+    catch (DbUpdateException exception) when (IsUniqueConstraint(exception))
+    {
+        return Results.Conflict(new { message = "Location code already exists." });
+    }
+}).Accepts<LocationInput>("application/json");
+
+api.MapDelete("/locations/{id:long}", (long id, HttpContext context, InventoryDatabase database) =>
+{
+    if (!IsAdmin(context))
+    {
+        return Results.Json(new { message = "You do not have access to this resource." }, statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    InventoryDatabase.LocationDeleteResult deletion;
+    try
+    {
+        deletion = database.DeleteLocation(id);
+    }
+    catch (DbUpdateException exception) when (IsForeignKeyConstraint(exception))
+    {
+        return Results.Conflict(new { message = "Reassign or remove inventory assigned to this location before deleting it." });
+    }
+
+    if (!deletion.Found) return Results.NotFound(new { message = "Location not found." });
+    if (deletion.HasInventory)
+    {
+        return Results.Conflict(new { message = "Reassign or remove inventory assigned to this location before deleting it." });
+    }
+
+    return Results.NoContent();
+});
 
 api.MapGet("/inventory", (HttpContext context, InventoryDatabase database) =>
 {
@@ -211,14 +660,14 @@ api.MapPost("/inventory", (HttpContext context, InventoryInput input, InventoryD
     }
 
     var vendorId = user.Role == "vendor" ? user.VendorId : requestedVendorId;
-    if (vendorId is null or <= 0)
+    if (vendorId is <= 0 || (user.Role == "vendor" && vendorId is null))
     {
-        return Results.BadRequest(new { message = "Inventory must be assigned to a vendor." });
+        return Results.BadRequest(new { message = "A valid vendor assignment is required." });
     }
 
     try
     {
-        var id = database.AddInventoryItem(input, vendorId.Value, locationId);
+        var id = database.AddInventoryItem(input, vendorId, locationId);
         return Results.Json(new { id, message = "Record created successfully." }, statusCode: StatusCodes.Status201Created);
     }
     catch (DbUpdateException exception) when (IsUniqueConstraint(exception))
@@ -298,9 +747,50 @@ static InventoryUserResponse CurrentUser(HttpContext context)
 
 static bool IsAdmin(HttpContext context) => CurrentUser(context).Role == "admin";
 
+static bool IsValidEmail(string email)
+{
+    try
+    {
+        return string.Equals(new MailAddress(email).Address, email, StringComparison.OrdinalIgnoreCase);
+    }
+    catch (FormatException)
+    {
+        return false;
+    }
+}
+
+static async Task<bool> RestoreFirebaseVendorContactAsync(
+    FirebaseAuth firebaseAuth,
+    string firebaseUid,
+    string email,
+    string displayName,
+    ILogger<Program> logger,
+    long vendorId)
+{
+    try
+    {
+        await firebaseAuth.UpdateUserAsync(new UserRecordArgs
+        {
+            Uid = firebaseUid,
+            Email = email,
+            DisplayName = displayName,
+        }, CancellationToken.None);
+        return true;
+    }
+    catch (Exception exception)
+    {
+        logger.LogError(exception, "Unable to restore Firebase contact details for vendor {VendorId}.", vendorId);
+        return false;
+    }
+}
+
 static bool IsUniqueConstraint(DbUpdateException exception) =>
     exception.InnerException is SqlException sqlException
     && sqlException.Number is 2601 or 2627;
+
+static bool IsForeignKeyConstraint(DbUpdateException exception) =>
+    exception.InnerException is SqlException sqlException
+    && sqlException.Number == 547;
 
 static string? FindDirectory(string startPath, string directoryName)
 {
@@ -319,18 +809,6 @@ static string? FindDirectory(string startPath, string directoryName)
 
 static async Task SeedDatabase(InventoryDbContext db)
 {
-    if (!await db.Vendors.AnyAsync())
-    {
-        db.Vendors.Add(new Vendor
-        {
-            Name = "Northwind Logistics",
-            ContactName = "Shane Porter",
-            Email = "vendor-support@northwind.io",
-            Status = "active",
-        });
-        await db.SaveChangesAsync();
-    }
-
     if (!await db.Locations.AnyAsync())
     {
         db.Locations.AddRange(
@@ -345,49 +823,37 @@ static async Task SeedDatabase(InventoryDbContext db)
         db.Users.Add(new UserAccount { Name = "Savage Admin", Email = "admin@si.co", Role = "admin" });
     }
 
-    var vendor = await db.Vendors.SingleAsync(item => item.Email == "vendor-support@northwind.io");
-    if (!await db.Users.AnyAsync(user => user.Email == "vendor@si.co"))
-    {
-        db.Users.Add(new UserAccount
-        {
-            Name = "Northwind Vendor",
-            Email = "vendor@si.co",
-            Role = "vendor",
-            VendorId = vendor.Id,
-        });
-    }
-
     await db.SaveChangesAsync();
 
     if (!await db.Inventory.AnyAsync())
     {
-        var location = await db.Locations.SingleAsync(item => item.Code == "DAL-01");
+        var location = await db.Locations.OrderBy(item => item.Id).FirstAsync();
         db.Inventory.AddRange(
             new InventoryItem
             {
                 Sku = "SKU-1001", Title = "Rivet Gun Kit", Category = "Hardware", Quantity = 16,
-                Status = "In Stock", VendorId = vendor.Id, LocationId = location.Id,
+                Status = "In Stock", LocationId = location.Id,
                 IntakeDate = "2026-03-02", ShipmentStatus = "In Transit",
                 Notes = "Assigned to engineering maintenance team.",
             },
             new InventoryItem
             {
                 Sku = "SKU-1002", Title = "Industrial Sensor Array", Category = "Electronics", Quantity = 42,
-                Status = "Low Stock", VendorId = vendor.Id, LocationId = location.Id,
+                Status = "In Stock", LocationId = location.Id,
                 IntakeDate = "2026-03-11", ShipmentStatus = "Received",
                 Notes = "Replacement units for outbound assembly line.",
             },
             new InventoryItem
             {
                 Sku = "SKU-1007", Title = "Safety Harness Set", Category = "Safety", Quantity = 8,
-                Status = "Reserved", VendorId = vendor.Id, LocationId = location.Id,
+                Status = "Low Stock", LocationId = location.Id,
                 IntakeDate = "2026-03-18", ShipmentStatus = "Pending",
                 Notes = "Reserved for field technician onboarding.",
             },
             new InventoryItem
             {
                 Sku = "SKU-1014", Title = "Forklift Battery Pack", Category = "Equipment", Quantity = 3,
-                Status = "Low Stock", VendorId = vendor.Id, LocationId = location.Id,
+                Status = "Low Stock", LocationId = location.Id,
                 IntakeDate = "2026-04-02", ShipmentStatus = "In Transit",
                 Notes = "Battery shipment scheduled for cross-dock transfer.",
             });

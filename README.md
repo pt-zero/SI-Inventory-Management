@@ -5,6 +5,8 @@ This project is a full-stack inventory management prototype designed for the Sav
 ## Tech stack
 
 - React + Vite for the front-end
+- React Router for separate login and protected inventory routes
+- shadcn/ui components with Tailwind CSS v4 for the front-end design system
 - ASP.NET Core + Azure SQL for the API and relational data
 - AutoMapper for mapping backend entities to API response DTOs
 - Firebase Authentication for sign-in and ID token verification
@@ -21,6 +23,16 @@ The app uses a simple three-layer architecture:
 
 The design is intentionally compact, but it follows good separation of concerns with a REST API and service-style route handlers.
 
+## Front-end components
+
+The React app uses local shadcn/ui components for buttons, cards, form controls, badges, and tables. Add more components with `npx shadcn@latest add <component>`; components are generated under `src/components/ui` and use the `@/` alias for imports.
+
+The login page is available at `/login`. Authenticated users can navigate to `/inventory`, `/vendors`, and `/locations`; vendor and location management routes are restricted to administrators. The root route redirects to `/inventory`, while unauthenticated users are redirected to sign in.
+
+Creating a vendor also creates a Firebase email/password account using the vendor email and initial password. Administrators can edit the contact name and email; contact changes are synchronized to the linked Firebase account, including the login email and display name. Administrators can optionally set a new password in the same edit form; leaving the password blank keeps the current password. The API requires Firebase Admin credentials configured through Application Default Credentials. Pausing a vendor disables its Firebase account and API access. Vendor deletion is blocked while inventory is assigned to that vendor; after deleting a vendor, the API also removes its associated Firebase accounts.
+
+Administrators can edit location names, codes, and types, or delete locations. Deletion is blocked while inventory records still reference the location.
+
 ## Features
 
 - Firebase email/password sign-in for Internal Admin and External Vendor personas
@@ -35,7 +47,7 @@ The design is intentionally compact, but it follows good separation of concerns 
 1. Create a Firebase project and add a Web app.
 2. In Firebase Console, enable **Email/Password** under Authentication > Sign-in method. Add `localhost` under Authentication > Settings > Authorized domains for local development.
 3. Copy `.env.example` to `.env` and fill in the Web app values. Set `FIREBASE_PROJECT_ID` to the same project ID.
-4. Configure Application Default Credentials for the API server. For local development, create a service-account key in Firebase Console > Project settings > Service accounts, save it outside the repository, and set `GOOGLE_APPLICATION_CREDENTIALS` to its absolute path. Never commit this key. On Google Cloud, use the runtime's attached service account instead.
+4. Configure Application Default Credentials for the API server. For local development, create a service-account key in Firebase Console > Project settings > Service accounts, save it outside the repository, and set `GOOGLE_APPLICATION_CREDENTIALS` to its absolute path. Never commit this key. Grant the service account the Firebase Authentication Admin role so the API can create, disable, and delete vendor accounts. On Google Cloud, use the runtime's attached service account instead and grant it the same role.
 
 The `.env.example` includes an optional `AUTOMAPPER_LICENSE_KEY` setting. Leave it empty unless you have an AutoMapper license key to configure; keep any real key private and out of source control.
 

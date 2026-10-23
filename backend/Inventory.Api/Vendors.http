@@ -1,0 +1,44 @@
+@baseUrl = http://localhost:3001
+@adminToken = REPLACE_WITH_ADMIN_FIREBASE_ID_TOKEN
+@vendorId = 1
+
+### Create a vendor and its Firebase email/password account
+POST {{baseUrl}}/api/vendors
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Example Supply",
+  "contact_name": "Alex Example",
+  "email": "alex@example.com",
+  "password": "ReplaceWithASecurePassword",
+  "status": "active"
+}
+
+### Change vendor status (pausing also disables the Firebase account)
+PUT {{baseUrl}}/api/vendors/{{vendorId}}/status
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "status": "paused"
+}
+
+### Update vendor contact details and Firebase login email/display name
+PUT {{baseUrl}}/api/vendors/{{vendorId}}/contact
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "contact_name": "Alex Example",
+  "email": "alex.updated@example.com",
+  "password": "ReplaceWithANewSecurePassword"
+}
+
+### Get a vendor
+GET {{baseUrl}}/api/vendors/{{vendorId}}
+Authorization: Bearer {{adminToken}}
+
+### Delete a vendor without assigned inventory
+DELETE {{baseUrl}}/api/vendors/{{vendorId}}
+Authorization: Bearer {{adminToken}}

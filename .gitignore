@@ -30,3 +30,5 @@ backend/publish/
 *.sln
 *.sw?
 Assignment/*
+jsconfig.json
+components.json

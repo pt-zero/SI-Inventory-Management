@@ -11,6 +11,8 @@ public sealed class InventoryMappingProfile : Profile
                 options.MapFrom(user => user.Vendor == null ? null : user.Vendor.Name));
 
         CreateMap<InventoryItem, InventoryItemResponse>()
+            .ForMember(response => response.Status, options =>
+                options.MapFrom(item => item.Quantity < 10 ? "Low Stock" : item.Status))
             .ForMember(response => response.VendorName, options =>
                 options.MapFrom(item => item.Vendor == null ? null : item.Vendor.Name))
             .ForMember(response => response.LocationName, options =>
