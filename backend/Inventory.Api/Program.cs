@@ -47,15 +47,16 @@ builder.Services.AddDbContext<InventoryDbContext>(options =>
 builder.Services.AddScoped<InventoryDatabase>();
 builder.Services.AddSingleton(_ =>
 {
+    var firebaseCredentialJson = builder.Configuration["FIREBASE_SERVICE_ACCOUNT_JSON"];
     var firebaseApp = FirebaseApp.Create(new AppOptions
     {
-        Credential = GoogleCredential.GetApplicationDefault(),
+        Credential = string.IsNullOrWhiteSpace(firebaseCredentialJson)
+            ? GoogleCredential.GetApplicationDefault()
+            : CredentialFactory.FromJson<ServiceAccountCredential>(firebaseCredentialJson).ToGoogleCredential(),
         ProjectId = projectId,
     }, "inventory-api");
     return FirebaseAuth.GetAuth(firebaseApp);
 });
-builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
-    policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader()));
 
 var app = builder.Build();
 app.Services.GetRequiredService<AutoMapper.IConfigurationProvider>().AssertConfigurationIsValid();
@@ -63,7 +64,10 @@ await using (var scope = app.Services.CreateAsyncScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<InventoryDbContext>();
     await db.Database.MigrateAsync();
-    await SeedDatabase(db);
+    if (app.Environment.IsDevelopment())
+    {
+        await SeedDatabase(db);
+    }
 }
 
 app.Use(async (context, next) =>
@@ -93,7 +97,6 @@ app.Use(async (context, next) =>
     }
 });
 
-app.UseCors();
 app.UseMiddleware<FirebaseAuthenticationMiddleware>();
 
 app.MapGet("/api/health", async (InventoryDbContext db, CancellationToken cancellationToken) =>

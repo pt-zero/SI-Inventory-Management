@@ -15,6 +15,7 @@ dist-ssr
 **/bin/
 **/obj/
 backend/publish/
+backend/publish.zip
 .env
 !.env.example
 *service-account*.json

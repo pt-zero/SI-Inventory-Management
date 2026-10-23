@@ -1,6 +1,6 @@
-# Savage Innovations Inventory Operations Prototype
+# Savage Innovations Inventory Management
 
-This project is a full-stack inventory management prototype designed for the Savage Innovations initial screening assignment. It demonstrates a modern operational workflow for inventory intake, cataloging, shipping, vendor coordination, and location tracking.
+This project is a full-stack inventory management application for inventory intake, cataloging, shipping, vendor coordination, and location tracking.
 
 ## Tech stack
 
@@ -70,14 +70,54 @@ This starts:
 - Front-end on `http://localhost:5173`
 - API on `http://localhost:3001`
 
-## Production build
+## Production deployment
+
+The production deployment uses one Linux Azure App Service for both the ASP.NET Core API and the Vite-built frontend. The API serves the frontend from `dist`, so the browser and API share an origin and do not require cross-origin access.
+
+Before deploying:
+
+- Configure these API settings in App Service **Configuration**: `ASPNETCORE_ENVIRONMENT=Production`, `AZURE_SQL_CONNECTION_STRING`, and `FIREBASE_PROJECT_ID`.
+- Set `FIREBASE_SERVICE_ACCOUNT_JSON` to the Firebase service-account JSON in App Service Configuration. Treat it as a secret; do not commit it or paste it into shell commands. The API uses this setting instead of Application Default Credentials when it is present.
+- Provide `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, and `VITE_FIREBASE_APP_ID` when building the frontend. These are build-time settings and are embedded in the Vite bundle; Firebase Authentication still requires the deployed hostname to be in the Firebase project's authorized domains.
+- The App Service uses its system-assigned managed identity for Azure SQL. Grant it the database permissions needed for application reads/writes and startup migrations; the deployed app uses `db_datareader`, `db_datawriter`, and `db_ddladmin`.
+- Production startup does not add demo locations, inventory, or the sample `admin@si.co` account. It does not remove demo rows already present in an existing database, so review and replace or remove those before opening the app to users. After the schema is ready, create the intended admin in Firebase Authentication and add a matching role record in `dbo.users`. For example:
+
+  ```sql
+  INSERT INTO dbo.users (name, email, role)
+  VALUES (N'<admin name>', N'<admin Firebase email>', N'admin');
+  ```
+
+  On the admin's first sign-in, the API links the Firebase UID to this account.
+
+Build and package the frontend and API from the repository root:
 
 ```bash
-npm run build
-npm start
+npm ci
+npm run build:client
+dotnet publish backend/Inventory.Api/Inventory.Api.csproj --configuration Release --output backend/publish
+cp -a dist backend/publish/dist
+python3 - <<'PY'
+from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
+
+root = Path("backend/publish")
+with ZipFile("backend/publish.zip", "w", ZIP_DEFLATED) as package:
+    for path in root.rglob("*"):
+        if path.is_file():
+            package.write(path, path.relative_to(root))
+PY
 ```
 
-The ASP.NET Core API serves the Vite production build from `dist`. Configure the Azure SQL connection string, Firebase settings, and server credentials in the production environment. Grant the application identity only the SQL permissions it needs; automatic EF migrations require schema-change privileges.
+Create a Linux App Service plan and app if they do not already exist, configure the settings above, then deploy the package:
+
+```bash
+az appservice plan create --resource-group <resource-group> --name <plan-name> --location <region> --is-linux --sku <sku>
+az webapp create --resource-group <resource-group> --plan <plan-name> --name <globally-unique-app-name> --runtime "DOTNETCORE:10.0"
+az webapp update --resource-group <resource-group> --name <globally-unique-app-name> --https-only true
+az webapp deploy --resource-group <resource-group> --name <globally-unique-app-name> --src-path backend/publish.zip --type zip
+```
+
+After deployment, verify `https://<globally-unique-app-name>.azurewebsites.net/api/health` and sign in with the provisioned admin account. Rebuild the client whenever its `VITE_FIREBASE_*` settings change.
 
 ## Assumptions
 
