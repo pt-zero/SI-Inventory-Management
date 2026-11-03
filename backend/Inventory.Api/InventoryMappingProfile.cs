@@ -8,7 +8,9 @@ public sealed class InventoryMappingProfile : Profile
     {
         CreateMap<UserAccount, InventoryUserResponse>()
             .ForMember(response => response.VendorName, options =>
-                options.MapFrom(user => user.Vendor == null ? null : user.Vendor.Name));
+                options.MapFrom(user => user.Vendor == null ? null : user.Vendor.Name))
+            .ForMember(response => response.CreatedByName, options =>
+                options.MapFrom(user => user.CreatedByUser == null ? null : user.CreatedByUser.Name));
 
         CreateMap<InventoryItem, InventoryItemResponse>()
             .ForMember(response => response.Status, options =>
@@ -16,9 +18,19 @@ public sealed class InventoryMappingProfile : Profile
             .ForMember(response => response.VendorName, options =>
                 options.MapFrom(item => item.Vendor == null ? null : item.Vendor.Name))
             .ForMember(response => response.LocationName, options =>
-                options.MapFrom(item => item.Location == null ? null : item.Location.Name));
+                options.MapFrom(item => item.Location == null ? null : item.Location.Name))
+            .ForMember(response => response.CreatedByName, options =>
+                options.MapFrom(item => item.CreatedByUser == null ? null : item.CreatedByUser.Name));
 
-        CreateMap<Vendor, VendorResponse>();
-        CreateMap<Location, LocationResponse>();
+        CreateMap<Vendor, VendorResponse>()
+            .ForMember(response => response.LocationIds, options =>
+                options.MapFrom(vendor => vendor.VendorLocations.Select(mapping => mapping.LocationId)))
+            .ForMember(response => response.LocationNames, options =>
+                options.MapFrom(vendor => vendor.VendorLocations.Select(mapping => mapping.Location.Name)));
+        CreateMap<Location, LocationResponse>()
+            .ForMember(response => response.VendorIds, options =>
+                options.MapFrom(location => location.VendorLocations.Select(mapping => mapping.VendorId)))
+            .ForMember(response => response.VendorNames, options =>
+                options.MapFrom(location => location.VendorLocations.Select(mapping => mapping.Vendor.Name)));
     }
 }

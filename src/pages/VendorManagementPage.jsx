@@ -1,13 +1,15 @@
 import { useState } from 'react';
-import { Boxes, Eye, EyeOff, Pencil, Save, Trash2, X } from 'lucide-react';
+import { Boxes, Eye, EyeOff, MapPin, Pencil, Save, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button.jsx';
 import { Card } from '@/components/ui/card.jsx';
 import { Input } from '@/components/ui/input.jsx';
 import { Select, SelectValue, SelectTrigger, SelectContent, SelectItem } from '@/components/ui/select.jsx';
+import { Checkbox } from '@/components/ui/checkbox.jsx';
+import { Label } from '@/components/ui/label.jsx';
 import { alert, confirm } from '@/components/custom/dialogs.jsx';
 import { request, useInventoryData } from '../contexts/InventoryDataContext.jsx';
 
-const EMPTY_FORM = { name: '', contact_name: '', email: '', password: '', status: 'active' };
+const EMPTY_FORM = { name: '', contact_name: '', email: '', password: '', status: 'active', location_ids: [] };
 const emailRegex = /^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$/;
 
 function PasswordInput({ value, onChange, ...props }) {
@@ -36,9 +38,10 @@ function PasswordInput({ value, onChange, ...props }) {
 }
 
 function VendorManagementPage() {
-  const { vendors, reload, setError } = useInventoryData();
+  const { vendors, locations, reload, setError } = useInventoryData();
   const [form, setForm] = useState(EMPTY_FORM);
   const [createEmailInvalid, setCreateEmailInvalid] = useState(false);
+  const [createLocationInvalid, setCreateLocationInvalid] = useState(false);
   const [creating, setCreating] = useState(false);
   const [updatingStatusId, setUpdatingStatusId] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
@@ -46,11 +49,19 @@ function VendorManagementPage() {
   const [contactForm, setContactForm] = useState({ contact_name: '', email: '', password: '' });
   const [contactEmailInvalid, setContactEmailInvalid] = useState(false);
   const [savingContactId, setSavingContactId] = useState(null);
+  const [locationVendorId, setLocationVendorId] = useState(null);
+  const [selectedLocationIds, setSelectedLocationIds] = useState([]);
+  const [savingLocationsId, setSavingLocationsId] = useState(null);
+  const [assignedLocationInvalid, setAssignedLocationInvalid] = useState(false);
 
   async function handleSubmit(event) {
     event.preventDefault();
     if (!emailRegex.test(form.email.trim())) {
       setCreateEmailInvalid(true);
+      return;
+    }
+    if (form.location_ids.length === 0) {
+      setCreateLocationInvalid(true);
       return;
     }
     setError('');
@@ -63,6 +74,7 @@ function VendorManagementPage() {
       });
       setForm(EMPTY_FORM);
       setCreateEmailInvalid(false);
+      setCreateLocationInvalid(false);
       await reload();
     } catch (requestError) {
       setError(requestError.message || 'Unable to add vendor.');
@@ -144,6 +156,7 @@ function VendorManagementPage() {
         cleanupWarning = true;
         setError(result.message);
       }
+
       await reload();
       if (!cleanupWarning) {
         await alert(`Vendor ${vendor.name} has been deleted.`, {
@@ -155,6 +168,47 @@ function VendorManagementPage() {
       setError(requestError.message || 'Unable to delete vendor.');
     } finally {
       setDeletingId(null);
+    }
+  }
+
+  function startEditingLocations(vendor) {
+    setLocationVendorId(vendor.id);
+    setSelectedLocationIds(vendor.location_ids || []);
+    setAssignedLocationInvalid(false);
+  }
+
+  function toggleAllLocations(selected) {
+    setSelectedLocationIds(selected ? locations.map((location) => location.id) : []);
+    if (selected) setAssignedLocationInvalid(false);
+  }
+
+  function toggleAllCreateLocations(selected) {
+    setForm((current) => ({
+      ...current,
+      location_ids: selected ? locations.map((location) => location.id) : [],
+    }));
+    if (selected) setCreateLocationInvalid(false);
+  }
+
+  async function saveVendorLocations(vendorId) {
+    if (selectedLocationIds.length === 0) {
+      setAssignedLocationInvalid(true);
+      return;
+    }
+    setAssignedLocationInvalid(false);
+    setSavingLocationsId(vendorId);
+    setError('');
+    try {
+      await request(`/vendors/${vendorId}/locations`, {
+        method: 'PUT',
+        body: JSON.stringify({ location_ids: selectedLocationIds }),
+      });
+      setLocationVendorId(null);
+      await reload();
+    } catch (requestError) {
+      setError(requestError.message || 'Unable to assign vendor locations.');
+    } finally {
+      setSavingLocationsId(null);
     }
   }
 
@@ -209,6 +263,16 @@ function VendorManagementPage() {
                         <Pencil />
                       </Button>
                       <Button
+                        variant="outline"
+                        size="icon"
+                        type="button"
+                        onClick={() => startEditingLocations(vendor)}
+                        aria-label={`Assign locations for ${vendor.name}`}
+                        title="Assign locations"
+                      >
+                        <MapPin />
+                      </Button>
+                      <Button
                         variant="destructive"
                         size="icon"
                         type="button"
@@ -220,27 +284,72 @@ function VendorManagementPage() {
                         <Trash2 />
                       </Button>
                     </div>
+                    {locationVendorId === vendor.id && (
+                      <form className="vendor-contact-edit" onSubmit={(event) => {
+                        event.preventDefault();
+                        saveVendorLocations(vendor.id);
+                      }}>
+                        <strong>Assigned locations</strong>
+                        {assignedLocationInvalid && (
+                          <small className="field-hint field-error" role="alert">
+                            At least one location must be assigned.
+                          </small>
+                        )}
+                        {locations.length > 0 && (
+                          <Label className="location-checkbox location-select-all">
+                            <Checkbox
+                              checked={locations.every((location) => selectedLocationIds.includes(location.id))}
+                              onCheckedChange={(checked) => toggleAllLocations(checked === true)}
+                            />
+                            Select all
+                          </Label>
+                        )}
+                        {locations.map((location) => (
+                          <Label key={location.id} className="location-checkbox">
+                            <Checkbox
+                              checked={selectedLocationIds.includes(location.id)}
+                              onCheckedChange={(checked) => setSelectedLocationIds((current) => {
+                                const nextIds = checked === true
+                                  ? [...current, location.id]
+                                  : current.filter((id) => id !== location.id);
+                                if (nextIds.length > 0) setAssignedLocationInvalid(false);
+                                return nextIds;
+                              })}
+                            />
+                            {location.name}
+                          </Label>
+                        ))}
+                        <div className="resource-actions">
+                          <Button type="submit" size="sm" disabled={savingLocationsId === vendor.id}>
+                            <Save />Save locations
+                          </Button>
+                          <Button type="button" variant="outline" size="sm" onClick={() => setLocationVendorId(null)}>
+                            <X />Cancel
+                          </Button>
+                        </div>
+                      </form>
+                    )}
                   </div>
                   {editingVendorId === vendor.id ? (
                     <form className="vendor-contact-edit" onSubmit={(event) => handleContactSave(event, vendor)}>
-                      <label>
-                        Contact name
+                      <Label>
+                        Contact Name
                         <Input
-                          value={contactForm.contact_name}
                           required
+                          value={contactForm.contact_name}
                           maxLength={200}
                           onChange={(event) => setContactForm((current) => ({
                             ...current,
                             contact_name: event.target.value,
                           }))}
                         />
-                      </label>
-                      <label>
-                        Contact email
+                      </Label>
+                      <Label>
+                        Contact Email
                         <Input
+                          required
                           type="email"
                           value={contactForm.email}
-                          required
                           maxLength={320}
                           aria-invalid={contactEmailInvalid}
                           aria-describedby={contactEmailInvalid ? `vendor-email-error-${vendor.id}` : undefined}
@@ -255,9 +364,9 @@ function VendorManagementPage() {
                             Enter a valid email address.
                           </small>
                         ) : null}
-                      </label>
-                      <label>
-                        New password
+                      </Label>
+                      <Label>
+                        New Password
                         <PasswordInput
                           value={contactForm.password}
                           minLength={6}
@@ -268,8 +377,10 @@ function VendorManagementPage() {
                             password: event.target.value,
                           }))}
                         />
-                        <small className="field-hint">Leave blank to keep the current password. If entered, use 6–128 characters.</small>
-                      </label>
+                        <small className="field-hint">
+                          Leave blank to keep the current password. If entered, use 6–128 characters.
+                        </small>
+                      </Label>
                       <div className="resource-actions">
                         <Button type="submit" size="sm" disabled={savingContactId === vendor.id}>
                           <Save />{savingContactId === vendor.id ? 'Saving…' : 'Save'}
@@ -312,20 +423,32 @@ function VendorManagementPage() {
             </div>
           </div>
           <form className="stack-form" onSubmit={handleSubmit}>
-            <label>
-              Vendor name
-              <Input value={form.name} required onChange={(event) => setForm({ ...form, name: event.target.value })} />
-            </label>
-            <label>
-              Contact name
-              <Input value={form.contact_name} required onChange={(event) => setForm({ ...form, contact_name: event.target.value })} />
-            </label>
-            <label>
-              Contact email
+            <Label>
+              Vendor Name
               <Input
+                required 
+                value={form.name} 
+                onChange={
+                  (event) => setForm({ ...form, name: event.target.value })
+                } 
+              />
+            </Label>
+            <Label>
+              Contact Name
+              <Input
+                required 
+                value={form.contact_name}
+                onChange={
+                  (event) => setForm({ ...form, contact_name: event.target.value })
+                }
+              />
+            </Label>
+            <Label>
+              Contact Email
+              <Input
+                required
                 type="email"
                 value={form.email}
-                required
                 aria-invalid={form.email && createEmailInvalid}
                 aria-describedby={createEmailInvalid ? 'new-vendor-email-error' : undefined}
                 onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
@@ -336,21 +459,20 @@ function VendorManagementPage() {
                   Enter a valid email address.
                 </small>
               ) : null}
-            </label>
-            <label>
-              Initial password 
+            </Label>
+            <Label>
+              Initial Password 
               <PasswordInput
-                value={form.password}
                 required
+                value={form.password}
                 minLength={6}
                 maxLength={128}
                 autoComplete="new-password"
                 onChange={(event) => setForm({ ...form, password: event.target.value })}
               />
               <small className="field-hint">At least 6 characters. This creates the vendor’s Firebase sign-in account.</small>
-            </label>
-
-            <label>
+            </Label>
+            <Label>
               Status
               <Select
                 className="w-full"
@@ -365,7 +487,43 @@ function VendorManagementPage() {
                   <SelectItem value="paused">Paused</SelectItem>
                 </SelectContent>
               </Select>
-            </label>
+            </Label>
+            <br></br>
+            <hr></hr>
+            <fieldset className="location-checkbox-group">
+              <legend>Assigned Locations</legend>
+              {locations.length > 0 && (
+                <Label className="location-checkbox location-select-all">
+                  <Checkbox
+                    checked={locations.every((location) => form.location_ids.includes(location.id))}
+                    onCheckedChange={(checked) => toggleAllCreateLocations(checked === true)}
+                  />
+                  Select all
+                </Label>
+              )}
+              {locations.length ? locations.map((location) => (
+                <Label key={location.id} className="location-checkbox">
+                  <Checkbox
+                    checked={form.location_ids.includes(location.id)}
+                    onCheckedChange={(checked) => setForm((current) => {
+                      const locationIds = checked === true
+                        ? [...current.location_ids, location.id]
+                        : current.location_ids.filter((id) => id !== location.id);
+                      if (locationIds.length > 0) setCreateLocationInvalid(false);
+                      return { ...current, location_ids: locationIds };
+                    })}
+                  />
+                  {location.name}
+                </Label>
+              )) : (
+                <small className="field-hint">No locations are available.</small>
+              )}
+              {createLocationInvalid && (
+                <small className="field-hint field-error" role="alert">
+                  At least one location must be assigned.
+                </small>
+              )}
+            </fieldset>
             <Button type="submit" disabled={creating} style={{ marginTop: '1rem' }}>
               {creating ? 'Creating account…' : 'Add vendor'}
             </Button>

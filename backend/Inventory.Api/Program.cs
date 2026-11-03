@@ -117,7 +117,10 @@ api.MapGet("/me", (HttpContext context) =>
 api.MapGet("/dashboard", (HttpContext context, InventoryDatabase database) =>
 {
     var user = CurrentUser(context);
-    var inventory = database.GetInventory(user.Role == "vendor" ? user.VendorId : null);
+    var allowedLocationIds = IsVendorLevelUser(user) && user.VendorId.HasValue
+        ? database.GetVendor(user.VendorId.Value)?.LocationIds
+        : null;
+    var inventory = database.GetInventory(IsVendorLevelUser(user) ? user.VendorId : null, allowedLocationIds);
     var vendorCounts = user.Role == "admin"
         ? database.GetVendorStatusCounts()
         : (Active: 0, Paused: 0);
@@ -135,7 +138,7 @@ api.MapGet("/dashboard", (HttpContext context, InventoryDatabase database) =>
 api.MapGet("/vendors", (HttpContext context, InventoryDatabase database) =>
 {
     var user = CurrentUser(context);
-    return Results.Ok(database.GetVendors(user.Role == "vendor" ? user.VendorId : null));
+    return Results.Ok(database.GetVendors(IsVendorLevelUser(user) ? user.VendorId : null));
 });
 
 api.MapPost("/vendors", async (
@@ -178,6 +181,14 @@ api.MapPost("/vendors", async (
     {
         return Results.BadRequest(new { message = "Vendor status must be active or paused." });
     }
+    if (!database.AllLocationsExist(input.LocationIds))
+    {
+        return Results.BadRequest(new { message = "One or more selected locations do not exist." });
+    }
+    if (input.LocationIds.Count == 0)
+    {
+        return Results.BadRequest(new { message = "At least one location must be assigned." });
+    }
 
     UserRecord firebaseUser;
     try
@@ -218,7 +229,8 @@ api.MapPost("/vendors", async (
             input.ContactName.Trim(),
             email,
             status,
-            firebaseUser.Uid);
+            firebaseUser.Uid,
+            input.LocationIds);
         return Results.Created($"/api/vendors/{id}", new { id, message = "Vendor and Firebase account created." });
     }
     catch (DbUpdateException exception) when (IsUniqueConstraint(exception))
@@ -260,6 +272,156 @@ api.MapPost("/vendors", async (
             statusCode: StatusCodes.Status500InternalServerError);
     }
 }).Accepts<VendorInput>("application/json");
+
+api.MapGet("/users", (
+    HttpContext context,
+    InventoryDatabase database,
+    HttpRequest request) =>
+{
+    var user = CurrentUser(context);
+    if (user.Role == "viewer")
+    {
+        return Results.Json(new { message = "You do not have access to this resource." }, statusCode: StatusCodes.Status403Forbidden);
+    }
+    long? requestedVendorId = null;
+    if (user.Role != "vendor"
+        && request.Query.TryGetValue("vendor_id", out var vendorIdValues)
+        && long.TryParse(vendorIdValues.ToString(), out var parsedVendorId))
+    {
+        requestedVendorId = parsedVendorId;
+    }
+    var assignedVendorId = user.Role == "vendor" ? user.VendorId : requestedVendorId;
+    if (user.Role == "vendor" && assignedVendorId is null or <= 0)
+    {
+        return Results.BadRequest(new { message = "A valid vendor ID is required." });
+    }
+    return Results.Ok(database.GetVendorUsers(assignedVendorId));
+});
+
+api.MapPost("/users", async (
+    HttpContext context,
+    VendorUserInput input,
+    InventoryDatabase database,
+    FirebaseAuth firebaseAuth,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
+{
+    var creator = CurrentUser(context);
+    if (creator.Role is not ("admin" or "vendor"))
+    {
+        return Results.Json(new { message = "Only administrators and vendor contacts can create vendor users." }, statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    long? vendorId;
+    try
+    {
+        vendorId = creator.Role == "vendor"
+            ? creator.VendorId
+            : InventoryDatabase.ParseNullableLong(input.VendorId);
+    }
+    catch (FormatException)
+    {
+        return Results.BadRequest(new { message = "Vendor ID must be numeric." });
+    }
+    var name = input.Name?.Trim();
+    var email = input.Email?.Trim().ToLowerInvariant();
+    if (vendorId is null or <= 0 || string.IsNullOrWhiteSpace(name)
+        || string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(input.Password))
+    {
+        return Results.BadRequest(new { message = "Name, email, password, and vendor are required." });
+    }
+    if (name.Length > 200 || email.Length > 320 || !IsValidEmail(email))
+    {
+        return Results.BadRequest(new { message = "Enter a valid name and email address." });
+    }
+    if (input.Password.Length < 6 || input.Password.Length > 128)
+    {
+        return Results.BadRequest(new { message = "The initial password must be between 6 and 128 characters." });
+    }
+    var assignedVendor = database.GetVendor(vendorId.Value);
+    if (assignedVendor is null)
+    {
+        return Results.BadRequest(new { message = "The selected vendor does not exist." });
+    }
+    if (creator.Role is "admin" or "vendor")
+    {
+        var contactEmail = assignedVendor.Email;
+        if (!EmailDomainsMatch(email, contactEmail))
+        {
+            var domain = GetEmailDomain(contactEmail);
+            return Results.BadRequest(new { message = $"View-only user email must use the vendor email domain @{domain}." });
+        }
+    }
+
+    UserRecord firebaseUser;
+    try
+    {
+        firebaseUser = await firebaseAuth.CreateUserAsync(new UserRecordArgs
+        {
+            Email = email,
+            Password = input.Password,
+            DisplayName = name,
+        }, cancellationToken);
+    }
+    catch (FirebaseAuthException exception) when (exception.AuthErrorCode == AuthErrorCode.EmailAlreadyExists)
+    {
+        return Results.Conflict(new { message = "A Firebase account already exists for this email address." });
+    }
+    catch (FirebaseAuthException exception)
+    {
+        logger.LogError(exception, "Unable to create Firebase account for vendor user email {Email}.", email);
+        return Results.Problem(title: "Unable to create vendor user.", statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    try
+    {
+        var id = database.AddVendorUser(name, email, firebaseUser.Uid, vendorId.Value, creator.Id);
+        return Results.Created($"/api/users/{id}", new { id, message = "View-only vendor user created." });
+    }
+    catch (DbUpdateException exception) when (IsUniqueConstraint(exception))
+    {
+        await firebaseAuth.DeleteUserAsync(firebaseUser.Uid, CancellationToken.None);
+        return Results.Conflict(new { message = "A vendor or user account already exists for this email address." });
+    }
+    catch (Exception exception)
+    {
+        logger.LogError(exception, "Unable to save vendor user email {Email}.", email);
+        await firebaseAuth.DeleteUserAsync(firebaseUser.Uid, CancellationToken.None);
+        return Results.Problem(title: "Unable to save vendor user.", statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
+api.MapDelete("/users/{id:long}", async (
+    long id,
+    HttpContext context,
+    InventoryDatabase database,
+    FirebaseAuth firebaseAuth) =>
+{
+    var user = CurrentUser(context);
+    long? vendorId = user.Role == "vendor" ? user.VendorId : null;
+    if (user.Role == "viewer")
+    {
+        return Results.Json(new { message = "You do not have access to this resource." }, statusCode: StatusCodes.Status403Forbidden);
+    }
+    if (user.Role == "vendor" && vendorId is null)
+    {
+        return Results.Forbid();
+    }
+
+    var firebaseUid = user.Role == "vendor" && vendorId.HasValue
+        ? database.DeleteVendorUser(id, vendorId.Value)
+        : null;
+    if (user.Role == "admin")
+    {
+        var viewer = database.GetVendorUsersForAdmin(id);
+        if (viewer is null) return Results.NotFound(new { message = "Vendor user not found." });
+        firebaseUid = viewer.FirebaseUid;
+        database.DeleteVendorUser(id, viewer.VendorId);
+    }
+    if (firebaseUid is null) return Results.NotFound(new { message = "Vendor user not found." });
+    await firebaseAuth.DeleteUserAsync(firebaseUid, CancellationToken.None);
+    return Results.NoContent();
+});
 
 api.MapGet("/vendors/{id:long}", (
     long id,
@@ -546,6 +708,22 @@ api.MapDelete("/vendors/{id:long}", async (
 
 api.MapGet("/locations", (InventoryDatabase database) => Results.Ok(database.GetLocations()));
 
+api.MapPut("/vendors/{id:long}/locations", (long id, HttpContext context, VendorLocationsInput input, InventoryDatabase database) =>
+{
+    if (!IsAdmin(context)) return Results.Json(new { message = "Only administrators can assign vendor locations." }, statusCode: StatusCodes.Status403Forbidden);
+    if (database.GetVendor(id) is null) return Results.NotFound(new { message = "Vendor not found." });
+    if (input.LocationIds.Count == 0) return Results.BadRequest(new { message = "At least one location must be assigned." });
+    try
+    {
+        database.SetVendorLocations(id, input.LocationIds);
+        return Results.Ok(new { message = "Vendor locations updated." });
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { message = exception.Message });
+    }
+});
+
 api.MapPost("/locations", (HttpContext context, LocationInput input, InventoryDatabase database) =>
 {
     if (!IsAdmin(context))
@@ -635,7 +813,10 @@ api.MapDelete("/locations/{id:long}", (long id, HttpContext context, InventoryDa
 api.MapGet("/inventory", (HttpContext context, InventoryDatabase database) =>
 {
     var user = CurrentUser(context);
-    return Results.Ok(database.GetInventory(user.Role == "vendor" ? user.VendorId : null));
+    var allowedLocationIds = IsVendorLevelUser(user) && user.VendorId.HasValue
+        ? database.GetVendor(user.VendorId.Value)?.LocationIds
+        : null;
+    return Results.Ok(database.GetInventory(IsVendorLevelUser(user) ? user.VendorId : null, allowedLocationIds));
 });
 
 api.MapPost("/inventory", (HttpContext context, InventoryInput input, InventoryDatabase database) =>
@@ -662,15 +843,24 @@ api.MapPost("/inventory", (HttpContext context, InventoryInput input, InventoryD
         return Results.BadRequest(new { message = "Vendor and location IDs must be numeric." });
     }
 
-    var vendorId = user.Role == "vendor" ? user.VendorId : requestedVendorId;
-    if (vendorId is <= 0 || (user.Role == "vendor" && vendorId is null))
+    if (user.Role == "viewer") return Results.Json(new { message = "View-only users cannot modify inventory." }, statusCode: StatusCodes.Status403Forbidden);
+    var vendorId = IsVendorLevelUser(user) ? user.VendorId : requestedVendorId;
+    if (vendorId is <= 0 || (IsVendorLevelUser(user) && vendorId is null))
     {
         return Results.BadRequest(new { message = "A valid vendor assignment is required." });
+    }
+    if (IsVendorLevelUser(user) && user.VendorId.HasValue)
+    {
+        var assignedLocationIds = database.GetVendor(user.VendorId.Value)?.LocationIds ?? [];
+        if (!locationId.HasValue || !assignedLocationIds.Contains(locationId.Value))
+        {
+            return Results.BadRequest(new { message = "Inventory must be assigned to a location mapped to your vendor." });
+        }
     }
 
     try
     {
-        var id = database.AddInventoryItem(input, vendorId, locationId);
+        var id = database.AddInventoryItem(input, vendorId, locationId, user.Id);
         return Results.Json(new { id, message = "Record created successfully." }, statusCode: StatusCodes.Status201Created);
     }
     catch (DbUpdateException exception) when (IsUniqueConstraint(exception))
@@ -687,14 +877,35 @@ api.MapPut("/inventory/{id:long}", (long id, HttpContext context, InventoryInput
     {
         return Results.NotFound(new { message = "Inventory record not found." });
     }
-    if (user.Role == "vendor" && current.VendorId != user.VendorId)
+    if (user.Role == "viewer") return Results.Json(new { message = "View-only users cannot modify inventory." }, statusCode: StatusCodes.Status403Forbidden);
+    if (IsVendorLevelUser(user) && current.VendorId != user.VendorId)
     {
         return Results.Json(new { message = "Vendor accounts can only edit assigned inventory." }, statusCode: StatusCodes.Status403Forbidden);
+    }
+    if (IsVendorLevelUser(user) && user.VendorId.HasValue)
+    {
+        long? requestedLocationId;
+        try
+        {
+            requestedLocationId = input.LocationId.ValueKind == System.Text.Json.JsonValueKind.Undefined
+                ? current.LocationId
+                : InventoryDatabase.ParseNullableLong(input.LocationId);
+        }
+        catch (FormatException)
+        {
+            return Results.BadRequest(new { message = "Location ID must be numeric." });
+        }
+
+        var assignedLocationIds = database.GetVendor(user.VendorId.Value)?.LocationIds ?? [];
+        if (!requestedLocationId.HasValue || !assignedLocationIds.Contains(requestedLocationId.Value))
+        {
+            return Results.BadRequest(new { message = "Inventory must be assigned to a location mapped to your vendor." });
+        }
     }
 
     try
     {
-        database.UpdateInventoryItem(id, input, user.Role == "vendor" ? user.VendorId : null);
+        database.UpdateInventoryItem(id, input, IsVendorLevelUser(user) ? user.VendorId : null);
         return Results.Ok(new { message = "Inventory record updated." });
     }
     catch (FormatException)
@@ -715,7 +926,8 @@ api.MapDelete("/inventory/{id:long}", (long id, HttpContext context, InventoryDa
     {
         return Results.NotFound(new { message = "Inventory record not found." });
     }
-    if (user.Role == "vendor" && current.VendorId != user.VendorId)
+    if (user.Role == "viewer") return Results.Json(new { message = "View-only users cannot modify inventory." }, statusCode: StatusCodes.Status403Forbidden);
+    if (IsVendorLevelUser(user) && current.VendorId != user.VendorId)
     {
         return Results.Json(new { message = "Vendor accounts can only delete assigned inventory." }, statusCode: StatusCodes.Status403Forbidden);
     }
@@ -748,7 +960,21 @@ static InventoryUserResponse CurrentUser(HttpContext context)
         ?? throw new InvalidOperationException("Authenticated inventory user is missing.");
 }
 
+static bool IsVendorLevelUser(InventoryUserResponse user) => user.Role is "vendor" or "viewer";
+
 static bool IsAdmin(HttpContext context) => CurrentUser(context).Role == "admin";
+
+static string? GetEmailDomain(string? email)
+{
+    var atIndex = email?.LastIndexOf('@') ?? -1;
+    return atIndex >= 0 && atIndex < email!.Length - 1
+        ? email[(atIndex + 1)..].Trim().ToLowerInvariant()
+        : null;
+}
+
+static bool EmailDomainsMatch(string email, string? contactEmail) =>
+    string.Equals(GetEmailDomain(email), GetEmailDomain(contactEmail), StringComparison.OrdinalIgnoreCase)
+    && GetEmailDomain(email) is not null;
 
 static bool IsValidEmail(string email)
 {

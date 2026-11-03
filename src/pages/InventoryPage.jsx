@@ -63,6 +63,7 @@ function InventoryPage() {
 
   const isAdmin = user?.role === 'admin';
   const isVendor = user?.role === 'vendor';
+  const isViewer = user?.role === 'viewer';
   const isLowQuantity = itemForm.quantity !== '' && Number(itemForm.quantity) < 10;
 
   function filterLowStock() {
@@ -247,7 +248,7 @@ function InventoryPage() {
                 <h3>Inventory Records</h3>
               </div>
               <div className="panel-tools">
-                {!isFormOpen && (
+                {!isViewer && !isFormOpen && (
                   <Button type="button" variant="outline" onClick={toggleItemForm}>
                     Add Item
                   </Button>
@@ -301,6 +302,7 @@ function InventoryPage() {
                     <TableHead>Status</TableHead>
                     <TableHead>Location</TableHead>
                     <TableHead>Vendor</TableHead>
+                    <TableHead>Created By</TableHead>
                     <TableHead style={{ textAlign: 'center' }}>Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -321,6 +323,7 @@ function InventoryPage() {
                       </TableCell>
                       <TableCell>{item.location_name || 'Unassigned'}</TableCell>
                       <TableCell>{item.vendor_name || '—'}</TableCell>
+                      <TableCell>{item.created_by_name || '—'}</TableCell>
                       <TableCell style={{ textAlign: 'center' }}>
                         <div>
                           <Button
@@ -332,16 +335,16 @@ function InventoryPage() {
                           >
                             <Notebook />
                           </Button>
-                          <Button
+                          {!isViewer && <Button
                             variant="ghost"
                             size="sm"
                             type="button" 
                             onClick={() => startEditing(item)} aria-label={`Edit ${item.title}`}
                           >
                             <Pencil />
-                          </Button>
+                          </Button>}
                           &nbsp;&nbsp;
-                          <Button
+                          {!isViewer && <Button
                             variant="destructive" 
                             size="sm" 
                             type="button" 
@@ -350,7 +353,7 @@ function InventoryPage() {
                             aria-label={`Delete ${item.title}`}
                           >
                             <Trash2 />
-                          </Button>
+                          </Button>}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -593,9 +596,9 @@ function InventoryPage() {
                     {notesItem.notes || 'No notes have been added for this item.'}
                   </p>
                   <footer className="notes-dialog-actions">
-                    <Button type="button" onClick={() => setIsEditingNotes(true)}>
+                    {!isViewer && <Button type="button" onClick={() => setIsEditingNotes(true)}>
                       Edit
-                    </Button>
+                    </Button>}
                   </footer>
                 </>
               )}

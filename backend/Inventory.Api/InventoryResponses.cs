@@ -14,6 +14,12 @@ public sealed class InventoryUserResponse
 
     [JsonPropertyName("vendor_name")]
     public string? VendorName { get; init; }
+
+    [JsonPropertyName("created_by_user_id")]
+    public long? CreatedByUserId { get; init; }
+
+    [JsonPropertyName("created_by_name")]
+    public string? CreatedByName { get; init; }
 }
 
 public sealed class InventoryItemResponse
@@ -47,6 +53,12 @@ public sealed class InventoryItemResponse
 
     [JsonPropertyName("location_name")]
     public string? LocationName { get; init; }
+
+    [JsonPropertyName("created_by_user_id")]
+    public long? CreatedByUserId { get; init; }
+
+    [JsonPropertyName("created_by_name")]
+    public string? CreatedByName { get; init; }
 }
 
 public sealed class VendorResponse
@@ -62,6 +74,12 @@ public sealed class VendorResponse
 
     [JsonPropertyName("created_at")]
     public DateTime CreatedAt { get; init; }
+
+    [JsonPropertyName("location_ids")]
+    public IReadOnlyList<long> LocationIds { get; init; } = [];
+
+    [JsonPropertyName("location_names")]
+    public IReadOnlyList<string> LocationNames { get; init; } = [];
 }
 
 public sealed class LocationResponse
@@ -73,4 +91,10 @@ public sealed class LocationResponse
 
     [JsonPropertyName("created_at")]
     public DateTime CreatedAt { get; init; }
+
+    [JsonPropertyName("vendor_ids")]
+    public IReadOnlyList<long> VendorIds { get; init; } = [];
+
+    [JsonPropertyName("vendor_names")]
+    public IReadOnlyList<string> VendorNames { get; init; } = [];
 }

@@ -8,6 +8,7 @@ public sealed class InventoryDbContext(DbContextOptions<InventoryDbContext> opti
     public DbSet<Location> Locations => Set<Location>();
     public DbSet<UserAccount> Users => Set<UserAccount>();
     public DbSet<InventoryItem> Inventory => Set<InventoryItem>();
+    public DbSet<VendorLocation> VendorLocations => Set<VendorLocation>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -36,9 +37,25 @@ public sealed class InventoryDbContext(DbContextOptions<InventoryDbContext> opti
             entity.HasIndex(location => location.Code).IsUnique();
         });
 
+        modelBuilder.Entity<VendorLocation>(entity =>
+        {
+            entity.ToTable("vendor_locations");
+            entity.HasKey(mapping => new { mapping.VendorId, mapping.LocationId });
+            entity.Property(mapping => mapping.VendorId).HasColumnName("vendor_id");
+            entity.Property(mapping => mapping.LocationId).HasColumnName("location_id");
+            entity.HasOne(mapping => mapping.Vendor)
+                .WithMany(vendor => vendor.VendorLocations)
+                .HasForeignKey(mapping => mapping.VendorId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(mapping => mapping.Location)
+                .WithMany(location => location.VendorLocations)
+                .HasForeignKey(mapping => mapping.LocationId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
         modelBuilder.Entity<UserAccount>(entity =>
         {
-            entity.ToTable("users", table => table.HasCheckConstraint("CK_users_role", "[role] IN ('admin','vendor')"));
+            entity.ToTable("users", table => table.HasCheckConstraint("CK_users_role", "[role] IN ('admin','vendor','viewer')"));
             entity.HasKey(user => user.Id);
             entity.Property(user => user.Id).HasColumnName("id").UseIdentityColumn();
             entity.Property(user => user.Name).HasColumnName("name").HasMaxLength(200).IsRequired();
@@ -47,11 +64,16 @@ public sealed class InventoryDbContext(DbContextOptions<InventoryDbContext> opti
             entity.Property(user => user.VendorId).HasColumnName("vendor_id");
             entity.Property(user => user.FirebaseUid).HasColumnName("firebase_uid").HasMaxLength(128);
             entity.Property(user => user.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("SYSUTCDATETIME()");
+            entity.Property(user => user.CreatedByUserId).HasColumnName("created_by_user_id");
             entity.HasIndex(user => user.Email).IsUnique();
             entity.HasIndex(user => user.FirebaseUid).IsUnique();
             entity.HasOne(user => user.Vendor)
                 .WithMany(vendor => vendor.Users)
                 .HasForeignKey(user => user.VendorId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(user => user.CreatedByUser)
+                .WithMany(creator => creator.CreatedUsers)
+                .HasForeignKey(user => user.CreatedByUserId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
@@ -71,6 +93,7 @@ public sealed class InventoryDbContext(DbContextOptions<InventoryDbContext> opti
             entity.Property(item => item.ShipmentStatus).HasColumnName("shipment_status").HasMaxLength(60).HasDefaultValue("Not Started").IsRequired();
             entity.Property(item => item.Notes).HasColumnName("notes").HasMaxLength(4000);
             entity.Property(item => item.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("SYSUTCDATETIME()");
+            entity.Property(item => item.CreatedByUserId).HasColumnName("created_by_user_id");
             entity.HasIndex(item => item.Sku).IsUnique();
             entity.HasOne(item => item.Vendor)
                 .WithMany(vendor => vendor.Inventory)
@@ -79,6 +102,10 @@ public sealed class InventoryDbContext(DbContextOptions<InventoryDbContext> opti
             entity.HasOne(item => item.Location)
                 .WithMany(location => location.Inventory)
                 .HasForeignKey(item => item.LocationId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.CreatedByUser)
+                .WithMany(user => user.CreatedInventory)
+                .HasForeignKey(item => item.CreatedByUserId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
     }

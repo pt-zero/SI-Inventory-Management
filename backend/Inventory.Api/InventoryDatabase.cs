@@ -10,7 +10,7 @@ public sealed class InventoryDatabase(InventoryDbContext db, IMapper mapper)
         var linkedUser = db.Users.Include(user => user.Vendor).SingleOrDefault(user => user.FirebaseUid == uid);
         if (linkedUser is not null)
         {
-            if (linkedUser.Role == "vendor"
+            if ((linkedUser.Role == "vendor" || linkedUser.Role == "viewer")
                 && !string.Equals(linkedUser.Vendor?.Status, "active", StringComparison.OrdinalIgnoreCase))
             {
                 return null;
@@ -24,7 +24,7 @@ public sealed class InventoryDatabase(InventoryDbContext db, IMapper mapper)
         {
             return null;
         }
-        if (account.Role == "vendor"
+        if ((account.Role == "vendor" || account.Role == "viewer")
             && !string.Equals(account.Vendor?.Status, "active", StringComparison.OrdinalIgnoreCase))
         {
             return null;
@@ -35,16 +35,21 @@ public sealed class InventoryDatabase(InventoryDbContext db, IMapper mapper)
         return mapper.Map<InventoryUserResponse>(account);
     }
 
-    public IReadOnlyList<InventoryItemResponse> GetInventory(long? vendorId = null)
+    public IReadOnlyList<InventoryItemResponse> GetInventory(long? vendorId = null, IReadOnlyCollection<long>? locationIds = null)
     {
         var query = db.Inventory
             .Include(item => item.Vendor)
             .Include(item => item.Location)
+            .Include(item => item.CreatedByUser)
             .AsNoTracking();
 
         if (vendorId.HasValue)
         {
             query = query.Where(item => item.VendorId == vendorId.Value);
+        }
+        if (locationIds is not null)
+        {
+            query = query.Where(item => item.LocationId.HasValue && locationIds.Contains(item.LocationId.Value));
         }
 
         return query.OrderByDescending(item => item.CreatedAt)
@@ -58,6 +63,7 @@ public sealed class InventoryDatabase(InventoryDbContext db, IMapper mapper)
         var item = db.Inventory
             .Include(item => item.Vendor)
             .Include(item => item.Location)
+            .Include(item => item.CreatedByUser)
             .AsNoTracking()
             .SingleOrDefault(item => item.Id == id);
         return item is null ? null : mapper.Map<InventoryItemResponse>(item);
@@ -65,7 +71,10 @@ public sealed class InventoryDatabase(InventoryDbContext db, IMapper mapper)
 
     public IReadOnlyList<VendorResponse> GetVendors(long? vendorId = null)
     {
-        var query = db.Vendors.AsNoTracking();
+        var query = db.Vendors
+            .Include(vendor => vendor.VendorLocations)
+                .ThenInclude(mapping => mapping.Location)
+            .AsNoTracking();
         if (vendorId.HasValue)
         {
             query = query.Where(vendor => vendor.Id == vendorId.Value);
@@ -74,6 +83,54 @@ public sealed class InventoryDatabase(InventoryDbContext db, IMapper mapper)
             .ToList()
             .Select(vendor => mapper.Map<VendorResponse>(vendor))
             .ToList();
+    }
+
+    public IReadOnlyList<InventoryUserResponse> GetVendorUsers(long? vendorId = null)
+    {
+        return db.Users
+            .Include(user => user.Vendor)
+            .Include(user => user.CreatedByUser)
+            .AsNoTracking()
+            .Where(user => user.Role == "viewer" && (!vendorId.HasValue || user.VendorId == vendorId.Value))
+            .OrderBy(user => user.Name)
+            .Select(user => mapper.Map<InventoryUserResponse>(user))
+            .ToList();
+    }
+
+    public long AddVendorUser(string name, string email, string firebaseUid, long vendorId, long createdByUserId)
+    {
+        var user = new UserAccount
+        {
+            Name = name,
+            Email = email,
+            Role = "viewer",
+            VendorId = vendorId,
+            FirebaseUid = firebaseUid,
+            CreatedByUserId = createdByUserId,
+        };
+        db.Users.Add(user);
+        db.SaveChanges();
+        return user.Id;
+    }
+
+    public string? DeleteVendorUser(long id, long vendorId)
+    {
+        var user = db.Users.SingleOrDefault(found => found.Id == id && found.VendorId == vendorId && found.Role == "viewer");
+        if (user is null) return null;
+        var firebaseUid = user.FirebaseUid;
+        db.Users.Remove(user);
+        db.SaveChanges();
+        return firebaseUid;
+    }
+
+    public sealed record VendorViewerIdentity(long VendorId, string? FirebaseUid);
+
+    public VendorViewerIdentity? GetVendorUsersForAdmin(long id)
+    {
+        return db.Users
+            .Where(user => user.Id == id && user.Role == "viewer" && user.VendorId.HasValue)
+            .Select(user => new VendorViewerIdentity(user.VendorId!.Value, user.FirebaseUid))
+            .SingleOrDefault();
     }
 
     public (int Active, int Paused) GetVendorStatusCounts()
@@ -91,20 +148,68 @@ public sealed class InventoryDatabase(InventoryDbContext db, IMapper mapper)
 
     public VendorResponse? GetVendor(long id)
     {
-        var vendor = db.Vendors.AsNoTracking().SingleOrDefault(item => item.Id == id);
+        var vendor = db.Vendors
+            .Include(item => item.VendorLocations)
+                .ThenInclude(mapping => mapping.Location)
+            .AsNoTracking()
+            .SingleOrDefault(item => item.Id == id);
         return vendor is null ? null : mapper.Map<VendorResponse>(vendor);
     }
 
     public IReadOnlyList<LocationResponse> GetLocations()
     {
-        return db.Locations.AsNoTracking().OrderBy(location => location.Name)
+        return db.Locations
+            .Include(location => location.VendorLocations)
+                .ThenInclude(mapping => mapping.Vendor)
+            .AsNoTracking()
+            .OrderBy(location => location.Name)
             .ToList()
             .Select(location => mapper.Map<LocationResponse>(location))
             .ToList();
     }
 
-    public long AddVendor(string name, string contactName, string email, string status, string firebaseUid)
+    public void SetVendorLocations(long vendorId, IReadOnlyCollection<long> locationIds)
     {
+        if (locationIds.Count == 0)
+        {
+            throw new ArgumentException("At least one location must be assigned.");
+        }
+        var vendor = db.Vendors.Single(found => found.Id == vendorId);
+        var validLocationIds = db.Locations
+            .Where(location => locationIds.Contains(location.Id))
+            .Select(location => location.Id)
+            .ToHashSet();
+        if (validLocationIds.Count != locationIds.Distinct().Count())
+        {
+            throw new ArgumentException("One or more locations do not exist.");
+        }
+        var existingMappings = db.VendorLocations.Where(mapping => mapping.VendorId == vendorId);
+        db.VendorLocations.RemoveRange(existingMappings);
+        db.VendorLocations.AddRange(validLocationIds.Select(locationId => new VendorLocation
+        {
+            VendorId = vendorId,
+            LocationId = locationId,
+            Vendor = vendor,
+        }));
+        db.SaveChanges();
+    }
+
+    public long AddVendor(string name, string contactName, string email, string status, string firebaseUid, IReadOnlyCollection<long> locationIds)
+    {
+        var requestedLocationIds = locationIds.Distinct().ToList();
+        if (requestedLocationIds.Count == 0)
+        {
+            throw new ArgumentException("At least one location must be assigned.");
+        }
+        var validLocationIds = db.Locations
+            .Where(location => requestedLocationIds.Contains(location.Id))
+            .Select(location => location.Id)
+            .ToList();
+        if (validLocationIds.Count != requestedLocationIds.Count)
+        {
+            throw new ArgumentException("One or more selected locations do not exist.");
+        }
+
         var vendor = new Vendor
         {
             Name = name,
@@ -120,9 +225,22 @@ public sealed class InventoryDatabase(InventoryDbContext db, IMapper mapper)
             FirebaseUid = firebaseUid,
             Vendor = vendor,
         });
+        foreach (var locationId in validLocationIds)
+        {
+            vendor.VendorLocations.Add(new VendorLocation
+            {
+                LocationId = locationId,
+            });
+        }
         db.Vendors.Add(vendor);
         db.SaveChanges();
         return vendor.Id;
+    }
+
+    public bool AllLocationsExist(IReadOnlyCollection<long> locationIds)
+    {
+        var distinctIds = locationIds.Distinct().ToList();
+        return db.Locations.Count(location => distinctIds.Contains(location.Id)) == distinctIds.Count;
     }
 
     public (string Status, string? FirebaseUid)? GetVendorStatusAndFirebaseUid(long id)
@@ -249,7 +367,7 @@ public sealed class InventoryDatabase(InventoryDbContext db, IMapper mapper)
     public sealed record VendorDeleteResult(bool Found, bool HasInventory, IReadOnlyList<string> FirebaseUids);
     public sealed record LocationDeleteResult(bool Found, bool HasInventory);
 
-    public long AddInventoryItem(InventoryInput input, long? vendorId, long? locationId)
+    public long AddInventoryItem(InventoryInput input, long? vendorId, long? locationId, long createdByUserId)
     {
         var item = new InventoryItem
         {
@@ -263,6 +381,7 @@ public sealed class InventoryDatabase(InventoryDbContext db, IMapper mapper)
             IntakeDate = input.IntakeDate!,
             ShipmentStatus = input.ShipmentStatus ?? "Not Started",
             Notes = input.Notes ?? "",
+            CreatedByUserId = createdByUserId,
         };
         db.Inventory.Add(item);
         db.SaveChanges();

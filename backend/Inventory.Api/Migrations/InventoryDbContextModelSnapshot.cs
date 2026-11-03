@@ -43,6 +43,10 @@ namespace Inventory.Api.Migrations
                         .HasColumnName("created_at")
                         .HasDefaultValueSql("SYSUTCDATETIME()");
 
+                    b.Property<long?>("CreatedByUserId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("created_by_user_id");
+
                     b.Property<string>("IntakeDate")
                         .IsRequired()
                         .HasMaxLength(32)
@@ -97,6 +101,8 @@ namespace Inventory.Api.Migrations
                         .HasColumnName("vendor_id");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("CreatedByUserId");
 
                     b.HasIndex("LocationId");
 
@@ -164,6 +170,10 @@ namespace Inventory.Api.Migrations
                         .HasColumnName("created_at")
                         .HasDefaultValueSql("SYSUTCDATETIME()");
 
+                    b.Property<long?>("CreatedByUserId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("created_by_user_id");
+
                     b.Property<string>("Email")
                         .IsRequired()
                         .HasMaxLength(320)
@@ -195,6 +205,8 @@ namespace Inventory.Api.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("CreatedByUserId");
+
                     b.HasIndex("Email")
                         .IsUnique();
 
@@ -206,7 +218,7 @@ namespace Inventory.Api.Migrations
 
                     b.ToTable("users", null, t =>
                         {
-                            t.HasCheckConstraint("CK_users_role", "[role] IN ('admin','vendor')");
+                            t.HasCheckConstraint("CK_users_role", "[role] IN ('admin','vendor','viewer')");
                         });
                 });
 
@@ -257,8 +269,30 @@ namespace Inventory.Api.Migrations
                     b.ToTable("vendors", (string)null);
                 });
 
+            modelBuilder.Entity("Inventory.Api.VendorLocation", b =>
+                {
+                    b.Property<long>("VendorId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("vendor_id");
+
+                    b.Property<long>("LocationId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("location_id");
+
+                    b.HasKey("VendorId", "LocationId");
+
+                    b.HasIndex("LocationId");
+
+                    b.ToTable("vendor_locations", (string)null);
+                });
+
             modelBuilder.Entity("Inventory.Api.InventoryItem", b =>
                 {
+                    b.HasOne("Inventory.Api.UserAccount", "CreatedByUser")
+                        .WithMany("CreatedInventory")
+                        .HasForeignKey("CreatedByUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("Inventory.Api.Location", "Location")
                         .WithMany("Inventory")
                         .HasForeignKey("LocationId")
@@ -269,6 +303,8 @@ namespace Inventory.Api.Migrations
                         .HasForeignKey("VendorId")
                         .OnDelete(DeleteBehavior.Restrict);
 
+                    b.Navigation("CreatedByUser");
+
                     b.Navigation("Location");
 
                     b.Navigation("Vendor");
@@ -276,10 +312,36 @@ namespace Inventory.Api.Migrations
 
             modelBuilder.Entity("Inventory.Api.UserAccount", b =>
                 {
+                    b.HasOne("Inventory.Api.UserAccount", "CreatedByUser")
+                        .WithMany("CreatedUsers")
+                        .HasForeignKey("CreatedByUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("Inventory.Api.Vendor", "Vendor")
                         .WithMany("Users")
                         .HasForeignKey("VendorId")
                         .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("CreatedByUser");
+
+                    b.Navigation("Vendor");
+                });
+
+            modelBuilder.Entity("Inventory.Api.VendorLocation", b =>
+                {
+                    b.HasOne("Inventory.Api.Location", "Location")
+                        .WithMany("VendorLocations")
+                        .HasForeignKey("LocationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Inventory.Api.Vendor", "Vendor")
+                        .WithMany("VendorLocations")
+                        .HasForeignKey("VendorId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Location");
 
                     b.Navigation("Vendor");
                 });
@@ -287,6 +349,15 @@ namespace Inventory.Api.Migrations
             modelBuilder.Entity("Inventory.Api.Location", b =>
                 {
                     b.Navigation("Inventory");
+
+                    b.Navigation("VendorLocations");
+                });
+
+            modelBuilder.Entity("Inventory.Api.UserAccount", b =>
+                {
+                    b.Navigation("CreatedInventory");
+
+                    b.Navigation("CreatedUsers");
                 });
 
             modelBuilder.Entity("Inventory.Api.Vendor", b =>
@@ -294,6 +365,8 @@ namespace Inventory.Api.Migrations
                     b.Navigation("Inventory");
 
                     b.Navigation("Users");
+
+                    b.Navigation("VendorLocations");
                 });
 #pragma warning restore 612, 618
         }

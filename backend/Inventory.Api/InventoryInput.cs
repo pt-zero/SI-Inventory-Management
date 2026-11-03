@@ -19,6 +19,9 @@ public sealed class VendorInput
 
     [JsonPropertyName("password")]
     public string? Password { get; init; }
+
+    [JsonPropertyName("location_ids")]
+    public List<long> LocationIds { get; init; } = [];
 }
 
 public sealed class VendorStatusInput
@@ -49,6 +52,27 @@ public sealed class LocationInput
 
     [JsonPropertyName("type")]
     public string? Type { get; init; }
+}
+
+public sealed class VendorLocationsInput
+{
+    [JsonPropertyName("location_ids")]
+    public List<long> LocationIds { get; init; } = [];
+}
+
+public sealed class VendorUserInput
+{
+    [JsonPropertyName("name")]
+    public string? Name { get; init; }
+
+    [JsonPropertyName("email")]
+    public string? Email { get; init; }
+
+    [JsonPropertyName("password")]
+    public string? Password { get; init; }
+
+    [JsonPropertyName("vendor_id")]
+    public JsonElement VendorId { get; init; }
 }
 
 public sealed class InventoryInput

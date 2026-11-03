@@ -13,6 +13,7 @@ const inventoryNavigation = [
 
 const adminNavigation = [
   { to: '/vendors', label: 'Vendors', icon: Users },
+  { to: '/users', label: 'Users', icon: Users },
   { to: '/locations', label: 'Locations', icon: MapPin },
 ];
 
@@ -20,7 +21,9 @@ function AppLayout() {
   const { user, loading, error, setError, reload } = useInventoryData();
   const navigation = user?.role === 'admin'
     ? [...inventoryNavigation, ...adminNavigation]
-    : inventoryNavigation;
+    : user?.role === 'vendor'
+      ? [...inventoryNavigation, { to: '/users', label: 'Users', icon: Users }]
+      : inventoryNavigation;
 
   async function handleLogout() {
     try {

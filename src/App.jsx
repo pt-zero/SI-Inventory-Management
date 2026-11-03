@@ -7,6 +7,7 @@ import InventoryPage from './pages/InventoryPage.jsx';
 import LoginPage from './pages/LoginPage.jsx';
 import VendorManagementPage from './pages/VendorManagementPage.jsx';
 import LocationManagementPage from './pages/LocationManagementPage.jsx';
+import UserManagementPage from './pages/UserManagementPage.jsx';
 import { InventoryDataProvider, useInventoryData } from './contexts/InventoryDataContext.jsx';
 
 function AuthLoading() {
@@ -29,6 +30,14 @@ function AdminRoute() {
   }
 
   return user?.role === 'admin'
+    ? <Outlet />
+    : <Navigate to="/inventory" replace />;
+}
+
+function VendorAccessRoute() {
+  const { user, ready } = useInventoryData();
+  if (!ready) return <AuthLoading />;
+  return user?.role === 'admin' || user?.role === 'vendor'
     ? <Outlet />
     : <Navigate to="/inventory" replace />;
 }
@@ -56,6 +65,9 @@ function AppRoutes({ authReady, firebaseUser }) {
         <Route element={<AdminRoute />}>
           <Route path="vendors" element={<VendorManagementPage />} />
           <Route path="locations" element={<LocationManagementPage />} />
+        </Route>
+        <Route element={<VendorAccessRoute />}>
+          <Route path="users" element={<UserManagementPage />} />
         </Route>
       </Route>
       <Route
