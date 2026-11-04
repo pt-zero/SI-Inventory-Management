@@ -17,7 +17,7 @@ This project is a full-stack inventory management application for inventory inta
 
 The app uses a simple three-layer architecture:
 
-1. Front-end: React dashboard with role-aware views for admin and vendor users.
+1. Front-end: React dashboard with role-aware views for administrators, vendors, and view-only vendor users.
 2. API layer: ASP.NET Core API with Firebase-authenticated access to inventory, vendors, and locations.
 3. Data layer: Azure SQL stores account role mappings, vendors, inventory, and locations with relational foreign keys.
 
@@ -27,19 +27,24 @@ The design is intentionally compact, but it follows good separation of concerns 
 
 The React app uses local shadcn/ui components for buttons, cards, form controls, badges, and tables. Add more components with `npx shadcn@latest add <component>`; components are generated under `src/components/ui` and use the `@/` alias for imports.
 
-The login page is available at `/login`. Authenticated users can navigate to `/inventory`, `/vendors`, and `/locations`; vendor and location management routes are restricted to administrators. The root route redirects to `/inventory`, while unauthenticated users are redirected to sign in.
+The login page is available at `/login`. Authenticated users can navigate to `/inventory`; administrators can also manage `/vendors`, `/users`, and `/locations`, while vendor users can manage view-only users for their assigned vendor at `/users`. View-only users have inventory access only and cannot change inventory or manage accounts. Vendor-facing users are scoped to inventory at their assigned vendor's locations. The root route redirects to `/inventory`, while unauthenticated users are redirected to sign in.
 
 Creating a vendor also creates a Firebase email/password account using the vendor email and initial password. Administrators can edit the contact name and email; contact changes are synchronized to the linked Firebase account, including the login email and display name. Administrators can optionally set a new password in the same edit form; leaving the password blank keeps the current password. The API requires Firebase Admin credentials configured through Application Default Credentials. Pausing a vendor disables its Firebase account and API access. Vendor deletion is blocked while inventory is assigned to that vendor; after deleting a vendor, the API also removes its associated Firebase accounts.
 
-Administrators can edit location names, codes, and types, or delete locations. Deletion is blocked while inventory records still reference the location.
+Administrators can edit location names, codes, and types, or delete locations. Vendors must have at least one assigned location; administrators assign or update those location mappings from vendor management. Deletion is blocked while inventory records or vendor mappings still reference the location.
+
+Inventory records show the account that created them, providing a basic accountability trail for inventory entry. Administrator and vendor accounts can create inventory within their permitted vendor and location scope; view-only users can inspect inventory but cannot add, edit, or delete it.
 
 ## Features
 
-- Firebase email/password sign-in for Internal Admin and External Vendor personas
+- Firebase email/password sign-in for administrators, vendors, and view-only vendor users
 - Inventory intake and management with filters and search
+- Inventory accountability through recorded creator names
+- Vendor-specific user administration and view-only access
 - Vendor and location management workflows
+- Required vendor location assignments and location-aware inventory visibility
 - Shipment tracking and status changes
-- Role-based access protections for vendor-only visibility
+- Role-based access protections for administrator, vendor, and viewer visibility
 - Front-end caching via localStorage to keep the dashboard responsive while revalidating with the API
 
 ## Firebase setup
@@ -122,23 +127,25 @@ After deployment, verify `https://<globally-unique-app-name>.azurewebsites.net/a
 ## Assumptions
 
 - The prototype focuses on core inventory workflows rather than full enterprise-grade compliance.
-- Vendor-facing users are scoped to their assigned vendor records.
+- Vendor and view-only users are scoped to their assigned vendor records and allowed locations.
+- Inventory created through the API records its creating user for accountability.
 - Azure SQL is the application's relational database.
 - Firebase Authentication verifies user identities; inventory roles and vendor assignments remain provisioned in Azure SQL and cannot be selected by users at sign-up.
 
 ## Known limitations
 
-- The application has only two roles (admin and vendor); user and role provisioning is managed outside the UI in Azure SQL.
+- Adding administrators and the primary vendor account still requires provisioning records in Azure SQL; vendor view-only accounts can be created through the Users page.
+- The inventory creator field records the user who created a record, but the application does not yet maintain a complete edit or deletion audit history.
 - Schema migrations run automatically when the API starts, so the runtime identity needs database permissions to apply schema changes.
 - Inventory, vendor, and location lists are returned without pagination. This is suitable for the demo dataset, but large catalogs will need server-side paging and filtering.
-- Inventory changes do not have an audit history, and shipment tracking is a manually maintained status rather than a carrier integration.
+- Inventory edits and deletions are not included in a complete audit history, and shipment tracking is a manually maintained status rather than a carrier integration.
 - Browser caching is for display responsiveness; it does not provide offline writes or cross-user shared cache invalidation.
 - The API has no automated test project or deployment pipeline yet.
 
 ## What I would build next
 
 1. Add automated API and data-access tests, including Firebase authorization, vendor data isolation, inventory validation, and database schema migrations.
-2. Add a managed account administration workflow for inviting users, assigning roles and vendors, and deactivating access without editing the database directly.
+2. Extend managed account administration for administrators and primary vendor accounts, including role provisioning and deactivation without editing Azure SQL directly.
 3. Add paginated inventory search and filtering, backed by Azure SQL indexes and query plans.
 4. Record an audit trail for inventory and role changes, then integrate shipment events from a carrier or warehouse system.
 5. Move schema deployment into a controlled release step and use managed identity or another secret-free credential flow for Azure SQL.
@@ -146,4 +153,4 @@ After deployment, verify `https://<globally-unique-app-name>.azurewebsites.net/a
 
 ## AI tooling usage
 
-This project was developed with AI-assisted tooling as encouraged by the assignment. The workflow used iterative design, code generation, validation, and refinement to develop a coherent MVP in a short time window.
+This project was developed with AI-assisted tooling as encouraged by the assignment. The workflow used iterative design, code generation, validation, and refinement to develop a coherent MVP in a short time window.
