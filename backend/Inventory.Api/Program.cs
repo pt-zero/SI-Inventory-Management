@@ -196,7 +196,7 @@ api.MapPost("/vendors", async (
     }
     catch (FirebaseAuthException exception)
     {
-        logger.LogError(exception, "Unable to create Firebase account for vendor email {Email}.", email);
+        logger.LogError(exception, "Unable to create Firebase account for vendor.");
         return Results.Problem(
             title: "Unable to create vendor account.",
             detail: $"Firebase Authentication rejected account creation (code: {exception.AuthErrorCode}). Verify that Email/Password sign-in is enabled, the API service account has Firebase Authentication Admin permissions, the Firebase project IDs match, and the password meets the project's policy.",
@@ -204,7 +204,7 @@ api.MapPost("/vendors", async (
     }
     catch (Exception exception)
     {
-        logger.LogError(exception, "Firebase account creation failed for vendor email {Email}.", email);
+        logger.LogError(exception, "Firebase account creation failed for vendor.");
         return Results.Problem(
             title: "Unable to create vendor account.",
             detail: "The API could not provision the Firebase account. Verify its Application Default Credentials, Firebase project ID, and service-account permissions; check the API logs for details.",
@@ -240,7 +240,7 @@ api.MapPost("/vendors", async (
     }
     catch (Exception exception)
     {
-        logger.LogError(exception, "Unable to save vendor account for email {Email}.", email);
+        logger.LogError(exception, "Unable to save vendor account.");
         var firebaseCleanupFailed = false;
         try
         {
